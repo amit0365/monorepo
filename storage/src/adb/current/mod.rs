@@ -4,6 +4,8 @@
 //! [Bitmap] over the activity status of each operation. The two structures are "grafted" together
 //! to minimize proof sizes.
 
+pub mod sync;
+
 use crate::{
     adb::{
         any::fixed::{Any, Config as AConfig},
