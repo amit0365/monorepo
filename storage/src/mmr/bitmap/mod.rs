@@ -28,6 +28,8 @@ use commonware_utils::sequence::prefixed_u64::U64;
 use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, warn};
 
+pub mod historical;
+
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
 /// Merkelization of the bitmap is performed over chunks of N bytes. If the goal is to minimize
@@ -79,6 +81,19 @@ pub struct Bitmap<H: CHasher, const N: usize> {
 impl<H: CHasher, const N: usize> Default for Bitmap<H, N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<H: CHasher, const N: usize> Clone for Bitmap<H, N> {
+    fn clone(&self) -> Self {
+        Self {
+            bitmap: self.bitmap.clone(),
+            authenticated_len: self.authenticated_len,
+            next_bit: self.next_bit,
+            mmr: self.mmr.clone(),
+            pruned_chunks: self.pruned_chunks,
+            dirty_chunks: self.dirty_chunks.clone(),
+        }
     }
 }
 

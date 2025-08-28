@@ -18,6 +18,7 @@ use crate::{
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
         storage::Grafting as GStorage,
         verification::Proof,
+        HistoricalBitmap,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -90,7 +91,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub status: Bitmap<H, N>,
+    pub status: HistoricalBitmap<H, N>,
 
     context: E,
 
@@ -154,12 +155,13 @@ impl<
 
         let context = context.with_label("adb::current");
         let cloned_pool = cfg.thread_pool.clone();
-        let mut status = Bitmap::restore_pruned(
+        let status_bitmap = Bitmap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
             cloned_pool,
         )
         .await?;
+        let mut status = HistoricalBitmap::from_bitmap(status_bitmap);
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
@@ -187,7 +189,7 @@ impl<
         if bitmap_pruned_pos < mmr_pruned_pos {
             // The bitmap should never be behind the mmr more than one chunk's worth of bits, since
             // the mmr is always pruned after it.
-            let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
+            let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
             assert!(
                 mmr_pruned_leaves <= chunk_bits || pruned_bits >= mmr_pruned_leaves - chunk_bits
             );
@@ -206,10 +208,14 @@ impl<
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        let inactivity_floor_loc =
-            Any::build_snapshot_from_log(start_leaf_num, &log, &mut snapshot, Some(&mut status))
-                .await
-                .unwrap();
+        let inactivity_floor_loc = Any::build_snapshot_from_log(
+            start_leaf_num,
+            &log,
+            &mut snapshot,
+            Some(status.current_mut()),
+        )
+        .await
+        .unwrap();
         grafter
             .load_grafted_digests(&status.dirty_chunks(), &mmr)
             .await?;
@@ -366,6 +372,10 @@ impl<
             .await?;
         self.status.sync(&mut grafter).await?;
 
+        // Cache the current bitmap state using the log size as the index
+        let log_size = self.any.op_count();
+        self.status.cache_state(log_size);
+
         let target_prune_loc = self
             .any
             .inactivity_floor_loc
@@ -465,7 +475,7 @@ impl<
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
         let start = start_loc / chunk_bits;
         let end = end_loc / chunk_bits;
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -476,6 +486,110 @@ impl<
         }
 
         let last_chunk = self.status.last_chunk();
+        if last_chunk.1 == 0 {
+            return Ok((proof, ops, chunks));
+        }
+
+        hasher.update(last_chunk.0);
+        proof.digests.push(hasher.finalize());
+
+        Ok((proof, ops, chunks))
+    }
+
+    /// Returns a historical proof that the specified range of operations were part of the database
+    /// at a specific point in time (identified by historical_log_size), along with the operations
+    /// from the range. Also returns the bitmap chunks required to verify the proof.
+    ///
+    /// # Arguments
+    /// * `hasher` - The hasher to use for proof generation
+    /// * `historical_log_size` - The log size at the historical point in time
+    /// * `start_loc` - The starting location of the range
+    /// * `max_ops` - The maximum number of operations to include
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// * The inclusion proof
+    /// * The operations in the range
+    /// * The bitmap chunks required for verification
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The historical state is not available in the cache
+    /// * The range is invalid for the historical state
+    /// * There are uncommitted operations
+    pub async fn historical_range_proof(
+        &self,
+        hasher: &mut H,
+        historical_log_size: u64,
+        start_loc: u64,
+        max_ops: u64,
+    ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
+        assert!(
+            !self.status.is_dirty(),
+            "must process updates before computing proofs"
+        );
+
+        // Validate that the range is within the historical state
+        if start_loc >= historical_log_size {
+            return Err(Error::OperationPruned(start_loc));
+        }
+
+        // Get the historical bitmap state
+        let historical_bitmap = self
+            .status
+            .get_state(historical_log_size)
+            .ok_or_else(|| Error::Mmr(crate::mmr::Error::ElementPruned(historical_log_size)))?;
+
+        // Check that the range is still available in the current MMR (not pruned)
+        let mmr = &self.any.mmr;
+
+        // Calculate the actual end location, limited by max_ops, historical state, and current MMR
+        let mmr_end_pos = mmr.last_leaf_pos().unwrap();
+        let mmr_end_leaf = leaf_pos_to_num(mmr_end_pos).unwrap();
+        let end_loc = std::cmp::min(
+            std::cmp::min(start_loc + max_ops - 1, historical_log_size - 1),
+            mmr_end_leaf,
+        );
+
+        // Create a grafted MMR using the historical bitmap state
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_pos = leaf_num_to_pos(end_loc);
+        let height = Self::grafting_height();
+        let historical_mmr_size = leaf_num_to_pos(historical_log_size);
+        let grafted_mmr = GStorage::<'_, H, _, _>::new(historical_bitmap, mmr, height);
+
+        // Generate the proof using the grafted MMR with historical bitmap
+        let mut proof = Proof::<H::Digest>::historical_range_proof(
+            &grafted_mmr,
+            historical_mmr_size,
+            start_pos,
+            end_pos,
+        )
+        .await?;
+
+        // Read the operations from the log (these are immutable historical records)
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        let futures = (start_loc..=end_loc)
+            .map(|i| self.any.log.read(i))
+            .collect::<Vec<_>>();
+        try_join_all(futures)
+            .await?
+            .into_iter()
+            .for_each(|op| ops.push(op));
+
+        // Gather the chunks necessary to verify the proof from the historical bitmap
+        let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
+        let start_chunk = start_loc / chunk_bits;
+        let end_chunk = end_loc / chunk_bits;
+        let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
+        for i in start_chunk..=end_chunk {
+            let bit_offset = i * chunk_bits;
+            let chunk = *historical_bitmap.get_chunk(bit_offset);
+            chunks.push(chunk);
+        }
+
+        // Handle partial chunks in the historical state
+        let last_chunk = historical_bitmap.last_chunk();
         if last_chunk.1 == 0 {
             return Ok((proof, ops, chunks));
         }
@@ -660,9 +774,13 @@ impl<
             }
         };
 
-        let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        let reconstructed_root =
-            Bitmap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
+        let next_bit = op_count % HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
+        let reconstructed_root = HistoricalBitmap::<H, N>::partial_chunk_root(
+            hasher,
+            &mmr_root,
+            next_bit,
+            &last_chunk_digest,
+        );
 
         reconstructed_root == *root
     }
@@ -1477,6 +1595,90 @@ pub mod test {
 
             db_no_delay.destroy().await.unwrap();
             db_max_delay.destroy().await.unwrap();
+        });
+    }
+
+    /// Test basic historical range proof functionality
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_historical_range_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "historical_range_proof_basic";
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone(), partition).await;
+
+            // Create first state with some operations
+            for i in 0u64..5 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 100).to_be_bytes());
+                db.update(key, value).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            let first_log_size = db.op_count();
+            let first_root = db.root(&mut hasher).await.unwrap();
+
+            // Generate proof from current state
+            let start_loc = 0;
+            let max_ops = 3;
+            let (original_proof, original_ops, original_chunks) = db
+                .range_proof(hasher.inner(), start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // Add more operations to change the state
+            for i in 5u64..10 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 200).to_be_bytes());
+                db.update(key, value).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            // Generate historical proof for the first state
+            let (historical_proof, historical_ops, historical_chunks) = db
+                .historical_range_proof(hasher.inner(), first_log_size, start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // Historical proof should match original proof exactly
+            assert_eq!(original_proof.size, historical_proof.size);
+            assert_eq!(original_proof.digests, historical_proof.digests);
+            assert_eq!(original_ops, historical_ops);
+            assert_eq!(original_chunks, historical_chunks);
+
+            // Both should verify against the first root
+            assert!(CurrentTest::verify_range_proof(
+                &mut hasher,
+                &original_proof,
+                start_loc,
+                &original_ops,
+                &original_chunks,
+                &first_root,
+            ));
+
+            assert!(CurrentTest::verify_range_proof(
+                &mut hasher,
+                &historical_proof,
+                start_loc,
+                &historical_ops,
+                &historical_chunks,
+                &first_root,
+            ));
+
+            // Historical proof should not verify against current root
+            let current_root = db.root(&mut hasher).await.unwrap();
+            if current_root != first_root {
+                assert!(!CurrentTest::verify_range_proof(
+                    &mut hasher,
+                    &historical_proof,
+                    start_loc,
+                    &historical_ops,
+                    &historical_chunks,
+                    &current_root,
+                ));
+            }
+
+            db.destroy().await.unwrap();
         });
     }
 }
