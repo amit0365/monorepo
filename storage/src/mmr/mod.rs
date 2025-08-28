@@ -73,6 +73,7 @@ use std::future::Future;
 use thiserror::Error;
 
 pub mod bitmap;
+pub use bitmap::historical::HistoricalBitmap;
 pub mod hasher;
 pub mod iterator;
 pub mod journaled;

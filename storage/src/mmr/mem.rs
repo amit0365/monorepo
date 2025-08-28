@@ -72,6 +72,19 @@ impl<H: CHasher> Default for Mmr<H> {
     }
 }
 
+impl<H: CHasher> Clone for Mmr<H> {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+            pruned_to_pos: self.pruned_to_pos,
+            pinned_nodes: self.pinned_nodes.clone(),
+            dirty_nodes: self.dirty_nodes.clone(),
+            dirty_digest: self.dirty_digest,
+            thread_pool: self.thread_pool.clone(),
+        }
+    }
+}
+
 impl<H: CHasher> Builder<H> for Mmr<H> {
     async fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
         Ok(self.add(hasher, element))
