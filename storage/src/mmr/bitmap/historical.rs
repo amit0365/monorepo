@@ -22,6 +22,12 @@ pub struct HistoricalBitmap<H: Hasher, const N: usize> {
 }
 
 impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
+    /// The size of a chunk in bytes.
+    pub const CHUNK_SIZE: usize = N;
+
+    /// The size of a chunk in bits.
+    pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
+
     /// Create a new historical bitmap with default cache size (10 states)
     pub fn new() -> Self {
         Self::with_cache_size(10)
@@ -36,9 +42,23 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
         }
     }
 
+    /// Create a new historical bitmap from an existing bitmap with specified cache size
+    pub fn from_bitmap(bitmap: Bitmap<H, N>, max_cached_states: u64) -> Self {
+        Self {
+            bitmap,
+            cached_states: HashMap::new(),
+            max_cached_states: max_cached_states as usize,
+        }
+    }
+
     /// Get a reference to the current bitmap
     pub fn current(&self) -> &Bitmap<H, N> {
         &self.bitmap
+    }
+
+    /// Get a mutable reference to the current bitmap
+    pub fn current_mut(&mut self) -> &mut Bitmap<H, N> {
+        &mut self.bitmap
     }
 
     /// Get the current bitmap bit count
@@ -117,6 +137,92 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
     /// Check if a state is available (either current or cached)
     pub fn has_state(&self, index: u64) -> bool {
         self.cached_states.contains_key(&index)
+    }
+
+    /// Get the dirty chunks from the current bitmap
+    pub fn dirty_chunks(&self) -> Vec<u64> {
+        self.bitmap.dirty_chunks()
+    }
+
+    /// Check if the current bitmap is dirty
+    pub fn is_dirty(&self) -> bool {
+        self.bitmap.is_dirty()
+    }
+
+    /// Get the last chunk from the current bitmap
+    pub fn last_chunk(&self) -> (&[u8; N], u64) {
+        self.bitmap.last_chunk()
+    }
+
+    /// Get a chunk from the current bitmap
+    pub fn get_chunk(&self, bit_offset: u64) -> &[u8; N] {
+        self.bitmap.get_chunk(bit_offset)
+    }
+
+    /// Sync the current bitmap
+    pub async fn sync(
+        &mut self,
+        hasher: &mut impl crate::mmr::Hasher<H>,
+    ) -> Result<(), crate::mmr::Error> {
+        self.bitmap.sync(hasher).await
+    }
+
+    /// Get the bit count from the current bitmap
+    pub fn bit_count(&self) -> u64 {
+        self.bitmap.bit_count()
+    }
+
+    /// Get the pruned bits from the current bitmap
+    pub fn pruned_bits(&self) -> u64 {
+        self.bitmap.pruned_bits()
+    }
+
+    /// Get a bit from the current bitmap
+    pub fn get_bit(&self, bit_offset: u64) -> bool {
+        self.bitmap.get_bit(bit_offset)
+    }
+
+    /// Write the pruned state of the current bitmap
+    pub async fn write_pruned<
+        C: commonware_runtime::Storage + commonware_runtime::Metrics + commonware_runtime::Clock,
+    >(
+        &self,
+        context: C,
+        partition: &str,
+    ) -> Result<(), crate::mmr::Error> {
+        self.bitmap.write_pruned(context, partition).await
+    }
+
+    /// Get the size from the current bitmap
+    pub fn size(&self) -> u64 {
+        self.bitmap.size()
+    }
+
+    /// Get a node from the current bitmap
+    pub fn get_node(&self, position: u64) -> Option<H::Digest> {
+        self.bitmap.get_node(position)
+    }
+
+    /// Returns a root digest that incorporates bits that aren't part of the MMR yet because they
+    /// belong to the last (unfilled) chunk.
+    pub fn partial_chunk_root(
+        hasher: &mut H,
+        mmr_root: &H::Digest,
+        next_bit: u64,
+        last_chunk_digest: &H::Digest,
+    ) -> H::Digest {
+        Bitmap::<H, N>::partial_chunk_root(hasher, mmr_root, next_bit, last_chunk_digest)
+    }
+}
+
+// Implement the Storage trait for HistoricalBitmap
+impl<H: Hasher, const N: usize> crate::mmr::storage::Storage<H::Digest> for HistoricalBitmap<H, N> {
+    fn size(&self) -> u64 {
+        self.size()
+    }
+
+    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, crate::mmr::Error> {
+        Ok(self.get_node(position))
     }
 }
 /*
