@@ -69,7 +69,7 @@ pub struct Config<T: Translator> {
     pub pruning_delay: u64,
 
     /// The number of historical bitmap states to cache for historical range proofs.
-    pub historical_cache_size: u64,
+    pub historical_cache_size: usize,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether

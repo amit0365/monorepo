@@ -28,26 +28,21 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = N as u64 * 8;
 
-    /// Create a new historical bitmap with default cache size (10 states)
-    pub fn new() -> Self {
-        Self::with_cache_size(10)
-    }
-
     /// Create a new historical bitmap with specified cache size
-    pub fn with_cache_size(max_cached_states: u64) -> Self {
+    pub fn new(max_cached_states: usize) -> Self {
         Self {
             bitmap: Bitmap::new(),
             cached_states: HashMap::new(),
-            max_cached_states: max_cached_states as usize,
+            max_cached_states,
         }
     }
 
     /// Create a new historical bitmap from an existing bitmap with specified cache size
-    pub fn from_bitmap(bitmap: Bitmap<H, N>, max_cached_states: u64) -> Self {
+    pub fn from_bitmap(bitmap: Bitmap<H, N>, max_cached_states: usize) -> Self {
         Self {
             bitmap,
             cached_states: HashMap::new(),
-            max_cached_states: max_cached_states as usize,
+            max_cached_states,
         }
     }
 
