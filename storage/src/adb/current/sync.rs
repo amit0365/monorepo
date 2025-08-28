@@ -329,8 +329,8 @@ where
     type Data = Fixed<K, V>;
     type Error = adb::Error;
 
-    async fn get_data<'a>(
-        &'a self,
+    async fn get_data(
+        &self,
         _size: u64,
         start_loc: u64,
         max_data: NonZeroU64,
@@ -366,7 +366,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{hash, sha256::Digest, Digest as _, Sha256};
+    use commonware_cryptography::{sha256::Digest, Digest as _, Sha256};
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
