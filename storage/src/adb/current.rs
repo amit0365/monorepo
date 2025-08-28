@@ -67,9 +67,6 @@ pub struct Config<T: Translator> {
 
     /// The number of operations to keep below the inactivity floor before pruning.
     pub pruning_delay: u64,
-
-    /// The number of historical bitmap states to cache for historical range proofs.
-    pub historical_cache_size: usize,
 }
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -162,7 +159,7 @@ impl<
             cloned_pool,
         )
         .await?;
-        let mut status = HistoricalBitmap::from_bitmap(status_bitmap, config.historical_cache_size);
+        let mut status = HistoricalBitmap::from_bitmap(status_bitmap);
 
         // Initialize the db's mmr/log.
         let mut hasher = Standard::<H>::new();
@@ -895,7 +892,6 @@ pub mod test {
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             pruning_delay: 10,
-            historical_cache_size: 5,
         }
     }
 

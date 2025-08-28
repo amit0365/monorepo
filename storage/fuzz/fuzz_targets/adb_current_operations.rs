@@ -56,7 +56,6 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
             pruning_delay: 10,
-            historical_cache_size: 10,
         };
 
         let mut db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
