@@ -522,13 +522,7 @@ impl<
         // Check that the range is still available in the current MMR (not pruned)
         let mmr = &self.any.mmr;
 
-        // Calculate the actual end location, limited by max_ops, historical state, and current MMR
-        let mmr_end_pos = mmr.last_leaf_pos().unwrap();
-        let mmr_end_leaf = leaf_pos_to_num(mmr_end_pos).unwrap();
-        let end_loc = std::cmp::min(
-            std::cmp::min(start_loc + max_ops.get() - 1, historical_log_size - 1),
-            mmr_end_leaf,
-        );
+        let end_loc = std::cmp::min(start_loc + max_ops.get() - 1, historical_log_size - 1);
 
         // Create a grafted MMR using the historical bitmap state
         let start_pos = leaf_num_to_pos(start_loc);
