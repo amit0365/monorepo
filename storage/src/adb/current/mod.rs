@@ -9,7 +9,7 @@ pub mod sync;
 use crate::{
     adb::{
         any::fixed::{Any, Config as AConfig},
-        Error,
+        extract_pinned_nodes, Error,
     },
     index::Index,
     mmr::{
@@ -758,6 +758,211 @@ impl<
         reconstructed_root == *root
     }
 
+    /// Generate sync data for a range of operations, including all necessary proofs.
+    ///
+    /// Returns:
+    /// 1. Grafted proof (for verification)
+    /// 2. Base MMR proof (for extracting pinned nodes)
+    /// 3. Bitmap MMR proof (for extracting pinned nodes)
+    /// 4. Operations
+    /// 5. Bitmap chunks
+    pub async fn sync_range_proof(
+        &self,
+        hasher: &mut H,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<
+        (
+            Proof<H::Digest>,
+            Proof<H::Digest>,
+            Proof<H::Digest>,
+            Vec<Fixed<K, V>>,
+            Vec<[u8; N]>,
+        ),
+        Error,
+    > {
+        assert!(
+            !self.status.is_dirty(),
+            "must process updates before computing proofs"
+        );
+
+        // Compute the start and end locations & positions of the range.
+        let mmr = &self.any.mmr;
+        let start_pos = leaf_num_to_pos(start_loc);
+        let leaves = mmr.leaves();
+        assert!(start_loc < leaves, "start_loc is invalid");
+        let max_loc = start_loc + max_ops.get();
+        let end_loc = if max_loc > leaves {
+            leaves - 1
+        } else {
+            max_loc - 1
+        };
+        let end_pos = leaf_num_to_pos(end_loc);
+
+        // 1. Generate the grafted proof (for verification against target root)
+        let height = Self::grafting_height();
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
+        let mut grafted_proof = verification::range_proof(&grafted_mmr, start_pos, end_pos).await?;
+
+        // 2. Generate base MMR proof (for extracting pinned nodes)
+        let base_proof = verification::range_proof(&self.any.mmr, start_pos, end_pos).await?;
+
+        // 3. Generate bitmap MMR proof (for extracting pinned nodes)
+        let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
+        let start_chunk = start_loc / chunk_bits;
+        let end_chunk = end_loc / chunk_bits;
+        debug!(
+            "sync_range_proof: start_loc={}, end_loc={}, start_chunk={}, end_chunk={}, chunk_bits={}",
+            start_loc, end_loc, start_chunk, end_chunk, chunk_bits
+        );
+
+        // Generate bitmap proof if there are chunks in the bitmap MMR
+        let bitmap_mmr_size = self.status.current().size();
+        let bitmap_proof = if bitmap_mmr_size > 0 {
+            let start_chunk_pos = leaf_num_to_pos(start_chunk);
+            let end_chunk_pos = leaf_num_to_pos(end_chunk);
+            verification::range_proof(self.status.current(), start_chunk_pos, end_chunk_pos).await?
+        } else {
+            // Return empty proof if no chunks available
+            Proof {
+                size: 0,
+                digests: vec![],
+            }
+        };
+
+        // 4. Collect the operations
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        let futures = (start_loc..=end_loc)
+            .map(|i| self.any.log.read(i))
+            .collect::<Vec<_>>();
+        try_join_all(futures)
+            .await?
+            .into_iter()
+            .for_each(|op| ops.push(op));
+
+        // 5. Gather the chunks necessary to verify the proof (same as original range_proof)
+        let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
+        for i in start_chunk..=end_chunk {
+            let bit_offset = i * chunk_bits;
+            let chunk = *self.status.get_chunk(bit_offset);
+            chunks.push(chunk);
+        }
+
+        // Handle partial last chunk (same as original range_proof)
+        let last_chunk = self.status.last_chunk();
+        if last_chunk.1 != 0 {
+            hasher.update(last_chunk.0);
+            grafted_proof.digests.push(hasher.finalize());
+        }
+
+        Ok((grafted_proof, base_proof, bitmap_proof, ops, chunks))
+    }
+
+    /// Verify sync data and extract pinned nodes for both MMRs.
+    ///
+    /// Parameters:
+    /// - `hasher`: The hasher for partial chunk handling
+    /// - `grafted_proof`: The proof over the grafted structure (for verification)
+    /// - `base_proof`: The base MMR proof (for extracting pinned nodes)
+    /// - `bitmap_proof`: The bitmap MMR proof (for extracting pinned nodes)
+    /// - `ops`: The operations to verify
+    /// - `chunks`: The bitmap chunks
+    /// - `start_loc`: Starting location of the range
+    /// - `target_root`: The root to verify against
+    ///
+    /// Returns:
+    /// 1. Base MMR pinned nodes
+    /// 2. Bitmap MMR pinned nodes
+    ///
+    /// Returns an error if the operations cannot be proven against the target root.
+    pub fn sync_range_proof_verify(
+        hasher: &mut Standard<H>,
+        grafted_proof: &Proof<H::Digest>,
+        base_proof: &Proof<H::Digest>,
+        bitmap_proof: &Proof<H::Digest>,
+        ops: &[Fixed<K, V>],
+        chunks: &[[u8; N]],
+        start_loc: u64,
+        target_root: &H::Digest,
+    ) -> Result<(Vec<H::Digest>, Vec<H::Digest>), Error> {
+        // First verify that the operations are valid against the grafted root
+        // Use the same verification logic as verify_range_proof
+        let op_count = leaf_pos_to_num(grafted_proof.size);
+        let Some(op_count) = op_count else {
+            return Err(Error::InvalidProof);
+        };
+        let end_loc = start_loc + ops.len() as u64 - 1;
+        if end_loc >= op_count {
+            return Err(Error::InvalidProof);
+        }
+
+        let start_pos = leaf_num_to_pos(start_loc);
+        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+
+        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
+        let mut verifier = GraftingVerifier::<H>::new(
+            Self::grafting_height(),
+            start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
+            chunk_vec,
+        );
+
+        // Handle partial chunk case (same as verify_range_proof)
+        if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
+            // No partial chunk - verify directly
+            if !grafted_proof.verify_range_inclusion(
+                &mut verifier,
+                &elements,
+                start_pos,
+                target_root,
+            ) {
+                return Err(Error::InvalidProof);
+            }
+        } else {
+            // Has partial chunk - last digest in proof should be the partial chunk hash
+            if grafted_proof.digests.is_empty() {
+                return Err(Error::InvalidProof);
+            }
+            let mut proof = grafted_proof.clone();
+            let last_chunk_digest = proof.digests.pop().unwrap();
+
+            // Reconstruct the MMR root
+            let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
+                Ok(root) => root,
+                Err(_) => return Err(Error::InvalidProof),
+            };
+
+            let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
+            let reconstructed_root = Bitmap::<H, N>::partial_chunk_root(
+                hasher.inner(),
+                &mmr_root,
+                next_bit,
+                &last_chunk_digest,
+            );
+
+            if reconstructed_root != *target_root {
+                return Err(Error::InvalidProof);
+            }
+        }
+
+        // Extract pinned nodes from base MMR proof
+        let ops_len = ops.len() as u64;
+        let base_pinned = extract_pinned_nodes(base_proof, start_loc, ops_len)?;
+
+        // Extract pinned nodes from bitmap MMR proof
+        // If the bitmap proof is empty (size = 0), there are no pinned nodes to extract
+        let bitmap_pinned = if bitmap_proof.size > 0 {
+            let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
+            let start_chunk = start_loc / chunk_bits;
+            let end_chunk = end_loc / chunk_bits;
+            let chunks_count = end_chunk - start_chunk + 1;
+            extract_pinned_nodes(bitmap_proof, start_chunk, chunks_count)?
+        } else {
+            vec![]
+        };
+
+        Ok((base_pinned, bitmap_pinned))
+    }
+
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(self) -> Result<(), Error> {
         self.any.close().await
@@ -1429,6 +1634,174 @@ pub mod test {
     }
 
     /// Test basic historical range proof functionality
+    /// Test the sync_range_proof and sync_range_proof_verify functions
+    #[test_traced("DEBUG")]
+    pub fn test_sync_range_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "sync_range_proof_test";
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone(), partition).await;
+
+            // Add some operations to the database
+            for i in 0u64..20 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 100).to_be_bytes());
+                db.update(key, value).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            // Get the current root for verification
+            let target_root = db.root(&mut hasher).await.unwrap();
+
+            // Test 1: Generate sync proofs for a range
+            let start_loc = 5;
+            let max_ops = NZU64!(5);
+            let (grafted_proof, base_proof, bitmap_proof, ops, chunks) = db
+                .sync_range_proof(hasher.inner(), start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // Verify we got the expected number of operations
+            assert_eq!(ops.len(), 5);
+
+            // Test 2: Verify the sync proofs and extract pinned nodes
+            let result = CurrentTest::sync_range_proof_verify(
+                &mut hasher,
+                &grafted_proof,
+                &base_proof,
+                &bitmap_proof,
+                &ops,
+                &chunks,
+                start_loc,
+                &target_root,
+            );
+
+            if result.is_err() {
+                panic!("Verification failed: {:?}", result.err().unwrap());
+            }
+            let (base_pinned, bitmap_pinned) = result.unwrap();
+
+            // Verify we got pinned nodes
+            assert!(!base_pinned.is_empty(), "Should have base pinned nodes");
+            // Bitmap pinned nodes might be empty if no chunks are synced to the bitmap MMR yet
+            // This is expected for small databases
+
+            // Test 3: Verify failure with wrong root
+            let wrong_root = Sha256::fill(0xFF);
+            let result = CurrentTest::sync_range_proof_verify(
+                &mut hasher,
+                &grafted_proof,
+                &base_proof,
+                &bitmap_proof,
+                &ops,
+                &chunks,
+                start_loc,
+                &wrong_root,
+            );
+            assert!(result.is_err(), "Should fail with wrong root");
+
+            // Test 4: Verify failure with modified operations
+            let mut bad_ops = ops.clone();
+            bad_ops[0] = Fixed::Delete(Sha256::fill(0xAA));
+            let result = CurrentTest::sync_range_proof_verify(
+                &mut hasher,
+                &grafted_proof,
+                &base_proof,
+                &bitmap_proof,
+                &bad_ops,
+                &chunks,
+                start_loc,
+                &target_root,
+            );
+            assert!(result.is_err(), "Should fail with modified operations");
+
+            // Test 5: Test with range at chunk boundary
+            // Add more operations to reach chunk boundary
+            for i in 20u64..260 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 100).to_be_bytes());
+                db.update(key, value).await.unwrap();
+            }
+            db.commit().await.unwrap();
+            let new_root = db.root(&mut hasher).await.unwrap();
+
+            // Test at chunk boundary (assuming chunk size is 256 bits = 32 bytes)
+            let chunk_boundary_start = 256;
+            let (grafted_proof2, base_proof2, bitmap_proof2, ops2, chunks2) = db
+                .sync_range_proof(hasher.inner(), chunk_boundary_start, NZU64!(4))
+                .await
+                .unwrap();
+
+            let result2 = CurrentTest::sync_range_proof_verify(
+                &mut hasher,
+                &grafted_proof2,
+                &base_proof2,
+                &bitmap_proof2,
+                &ops2,
+                &chunks2,
+                chunk_boundary_start,
+                &new_root,
+            );
+            assert!(result2.is_ok(), "Should verify at chunk boundary");
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Test sync_range_proof with operations spanning multiple chunks
+    #[test_traced("DEBUG")]
+    pub fn test_sync_range_proof_multi_chunk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "sync_range_proof_multi_chunk";
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone(), partition).await;
+
+            // Add many operations to span multiple chunks
+            // Assuming chunk size is 256 bits
+            for i in 0u64..600 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 100).to_be_bytes());
+                db.update(key, value).await.unwrap();
+                if i % 50 == 49 {
+                    db.commit().await.unwrap(); // Commit periodically
+                }
+            }
+            db.commit().await.unwrap();
+            let target_root = db.root(&mut hasher).await.unwrap();
+
+            // Test range spanning multiple chunks
+            // Start from a position that's likely above the inactivity floor
+            let inactivity_floor = db.inactivity_floor_loc();
+            let start_loc = std::cmp::max(400, inactivity_floor); // Start from 400 or floor, whichever is higher
+            let max_ops = NZU64!(150); // Get 150 operations
+            let (grafted_proof, base_proof, bitmap_proof, ops, chunks) = db
+                .sync_range_proof(hasher.inner(), start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // Verify we got operations (might be less than 150 if we're near the end)
+            assert!(!ops.is_empty(), "Should have operations");
+            assert!(ops.len() <= 150, "Should not exceed max_ops");
+
+            // Verify the proofs
+            let result = CurrentTest::sync_range_proof_verify(
+                &mut hasher,
+                &grafted_proof,
+                &base_proof,
+                &bitmap_proof,
+                &ops,
+                &chunks,
+                start_loc,
+                &target_root,
+            );
+            assert!(result.is_ok(), "Multi-chunk verification should succeed");
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("DEBUG")]
     pub fn test_current_db_historical_range_proof() {
         let executor = deterministic::Runner::default();

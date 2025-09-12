@@ -46,6 +46,10 @@ pub enum Error {
     /// The requested key was not found in the snapshot.
     #[error("key not found")]
     KeyNotFound,
+
+    /// The proof is invalid.
+    #[error("invalid proof")]
+    InvalidProof,
 }
 
 /// Utility to align the sizes of an MMR and location journal pair, used by keyless, immutable &
