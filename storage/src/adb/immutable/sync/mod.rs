@@ -6,7 +6,7 @@ use crate::{
         sync::{self, Journal as _},
     },
     journal::variable,
-    mmr::{self, hasher::Standard},
+    mmr::{self, StandardHasher as Standard},
     store::operation::Variable,
     translator::Translator,
 };
@@ -36,7 +36,7 @@ where
     let mut size = lower_bound;
     let mut current_section: Option<u64> = None;
     let mut index_in_section: u64 = 0;
-    let stream = journal.replay(NZUsize!(1024)).await?;
+    let stream = journal.replay(0, 0, NZUsize!(1024)).await?;
     pin_mut!(stream);
     while let Some(item) = stream.next().await {
         match item {
@@ -73,7 +73,7 @@ where
     T: Translator,
 {
     type Data = Variable<K, V>;
-    type Proof = mmr::verification::Proof<H::Digest>;
+    type Proof = mmr::Proof<H::Digest>;
     type PinnedNodes = Vec<H::Digest>;
     type Journal = journal::Journal<E, K, V>;
     type Hasher = H;
@@ -272,7 +272,7 @@ mod tests {
                 Engine, Journal, Target,
             },
         },
-        mmr::hasher::Standard,
+        mmr::StandardHasher as Standard,
         store::operation::Variable,
         translator::TwoCap,
     };
