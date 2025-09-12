@@ -212,9 +212,8 @@ impl<H: Hasher, const N: usize> crate::mmr::storage::Storage<H::Digest> for Hist
 }
 #[cfg(test)]
 mod tests {
-    use crate::mmr::hasher::Standard;
-
     use super::*;
+    use crate::mmr::hasher::Standard;
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner as _};
 
@@ -239,8 +238,8 @@ mod tests {
         let hb = TestHistoricalBitmap::from_bitmap(bitmap);
         assert_eq!(hb.current().bit_count(), 2);
         assert_eq!(hb.cached_count(), 0);
-        assert_eq!(hb.current().get_bit(0), true);
-        assert_eq!(hb.current().get_bit(1), false);
+        assert!(hb.current().get_bit(0));
+        assert!(!hb.current().get_bit(1));
     }
 
     #[test]
@@ -262,12 +261,12 @@ mod tests {
 
         let state_1 = hb.get_state(1).unwrap();
         assert_eq!(state_1.bit_count(), 1);
-        assert_eq!(state_1.get_bit(0), true);
+        assert!(state_1.get_bit(0));
 
         let state_2 = hb.get_state(2).unwrap();
         assert_eq!(state_2.bit_count(), 2);
-        assert_eq!(state_2.get_bit(0), true);
-        assert_eq!(state_2.get_bit(1), false);
+        assert!(state_2.get_bit(0));
+        assert!(!state_2.get_bit(1));
     }
 
     #[test]
@@ -347,10 +346,10 @@ mod tests {
 
         // Verify cached state preserves original bit value
         let cached_3 = hb.get_state(3).unwrap();
-        assert_eq!(cached_3.get_bit(1), false);
+        assert!(!cached_3.get_bit(1));
 
         // Verify current state has modified bit value
-        assert_eq!(hb.current().get_bit(1), true);
+        assert!(hb.current().get_bit(1));
     }
 
     #[test]

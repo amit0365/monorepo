@@ -501,7 +501,7 @@ impl<
         hasher: &mut H,
         historical_log_size: u64,
         start_loc: u64,
-        max_ops: u64,
+        max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
         assert!(
             !self.status.is_dirty(),
@@ -526,7 +526,7 @@ impl<
         let mmr_end_pos = mmr.last_leaf_pos().unwrap();
         let mmr_end_leaf = leaf_pos_to_num(mmr_end_pos).unwrap();
         let end_loc = std::cmp::min(
-            std::cmp::min(start_loc + max_ops - 1, historical_log_size - 1),
+            std::cmp::min(start_loc + max_ops.get() - 1, historical_log_size - 1),
             mmr_end_leaf,
         );
 
