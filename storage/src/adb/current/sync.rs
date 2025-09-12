@@ -325,14 +325,16 @@ where
 
     async fn get_data(
         &self,
-        _size: u64,
+        size: u64,
         start_loc: u64,
         max_data: NonZeroU64,
     ) -> Result<sync::resolver::FetchResult<Self::Data, Self::Proof>, Self::Error> {
         let db = self.read().await;
         let mut hasher = H::new();
 
-        let (proof, ops, chunks) = db.range_proof(&mut hasher, start_loc, max_data).await?;
+        let (proof, ops, chunks) = db
+            .historical_range_proof(&mut hasher, size, start_loc, max_data)
+            .await?;
 
         let sync_proof = Proof { proof, chunks };
 
