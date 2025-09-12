@@ -141,7 +141,7 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
     /// Sync the current bitmap
     pub async fn sync(
         &mut self,
-        hasher: &mut impl crate::mmr::Hasher<H>,
+        hasher: &mut impl crate::mmr::hasher::Hasher<H>,
     ) -> Result<(), crate::mmr::Error> {
         self.bitmap.sync(hasher).await
     }
@@ -191,6 +191,12 @@ impl<H: Hasher, const N: usize> HistoricalBitmap<H, N> {
         last_chunk_digest: &H::Digest,
     ) -> H::Digest {
         Bitmap::<H, N>::partial_chunk_root(hasher, mmr_root, next_bit, last_chunk_digest)
+    }
+}
+
+impl<H: Hasher, const N: usize> Default for HistoricalBitmap<H, N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

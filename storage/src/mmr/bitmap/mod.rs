@@ -13,12 +13,13 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        iterator::leaf_num_to_pos,
-        mem::{Config as MemConfig, Mmr},
-        verification::Proof,
-        Error,
+        hasher::Hasher,
+        iterator::{leaf_num_to_pos, nodes_to_pin},
+        mem::{Config, Mmr},
+        storage::Storage,
+        verification, Error,
         Error::*,
-        Hasher,
+        Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -168,7 +169,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         let mmr_size = leaf_num_to_pos(pruned_chunks as u64);
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(size = mmr_size, pos, "missing pinned node");
                 return Err(MissingNode(pos));
@@ -186,7 +187,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         metadata.close().await?;
 
-        let mmr = Mmr::init(MemConfig {
+        let mmr = Mmr::init(Config {
             nodes: Vec::new(),
             pruned_to_pos: mmr_size,
             pinned_nodes,
@@ -225,7 +226,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
 
         // Write the pinned nodes.
         let mmr_size = leaf_num_to_pos(self.pruned_chunks as u64);
-        for (i, digest) in Proof::<H::Digest>::nodes_to_pin(mmr_size).enumerate() {
+        for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, digest.to_vec());
@@ -568,7 +569,7 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
             ));
         }
 
-        let mut proof = Proof::<H::Digest>::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
+        let mut proof = verification::range_proof(&self.mmr, leaf_pos, leaf_pos).await?;
         proof.size = self.bit_count();
         if self.next_bit == 0 {
             // Bitmap is chunk aligned.
@@ -664,14 +665,25 @@ impl<H: CHasher, const N: usize> Bitmap<H, N> {
         };
         let metadata =
             Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+
         metadata.destroy().await.map_err(MetadataError)
+    }
+}
+
+impl<H: CHasher, const N: usize> Storage<H::Digest> for Bitmap<H, N> {
+    fn size(&self) -> u64 {
+        self.size()
+    }
+
+    async fn get_node(&self, position: u64) -> Result<Option<H::Digest>, Error> {
+        Ok(self.get_node(position))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::hasher::Standard;
+    use crate::mmr::StandardHasher;
     use commonware_codec::FixedSize;
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
@@ -693,7 +705,7 @@ mod tests {
     fn test_bitmap_verify_empty_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             let proof = Proof {
                 size: 100,
                 digests: Vec::new(),
@@ -724,7 +736,7 @@ mod tests {
             assert_eq!(bitmap.last_chunk().1, 0);
 
             // Add a single bit
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             let root = bitmap.root(&mut hasher).await.unwrap();
             bitmap.append(true);
             bitmap.sync(&mut hasher).await.unwrap();
@@ -783,7 +795,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let test_chunk = test_chunk(b"test");
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
 
             // Add each bit one at a time after the first chunk.
             let mut bitmap = Bitmap::<_, SHA256_SIZE>::new();
@@ -869,7 +881,7 @@ mod tests {
             let mut bitmap = Bitmap::<Sha256, SHA256_SIZE>::new();
             bitmap.append_chunk_unchecked(&test_chunk(b"test"));
             bitmap.append_chunk_unchecked(&test_chunk(b"test2"));
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             bitmap.sync(&mut hasher).await.unwrap();
 
             bitmap.prune_to_bit(256);
@@ -883,7 +895,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a starting test MMR with two chunks worth of bits.
             let mut bitmap = Bitmap::<Sha256, SHA256_SIZE>::default();
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             bitmap.append_chunk_unchecked(&test_chunk(b"test"));
             bitmap.append_chunk_unchecked(&test_chunk(b"test2"));
             bitmap.sync(&mut hasher).await.unwrap();
@@ -928,7 +940,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a test MMR with a few chunks worth of bits.
             let mut bitmap = Bitmap::<Sha256, SHA256_SIZE>::default();
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             bitmap.append_chunk_unchecked(&test_chunk(b"test"));
             bitmap.append_chunk_unchecked(&test_chunk(b"test2"));
             bitmap.append_chunk_unchecked(&test_chunk(b"test3"));
@@ -993,7 +1005,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             let mut bitmap = Bitmap::<Sha256, N>::new();
             for i in 0u32..10 {
                 bitmap.append_chunk_unchecked(&test_chunk(format!("test{i}").as_bytes()));
@@ -1055,7 +1067,7 @@ mod tests {
             assert_eq!(bitmap.bit_count(), 0);
 
             // Add a non-trivial amount of data.
-            let mut hasher = Standard::new();
+            let mut hasher = StandardHasher::new();
             for i in 0..FULL_CHUNK_COUNT {
                 bitmap.append_chunk_unchecked(&test_chunk(format!("test{i}").as_bytes()));
             }

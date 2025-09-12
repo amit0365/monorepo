@@ -4,9 +4,10 @@ use crate::{
     journal::fixed as fixed_journal,
     mmr::{
         bitmap::Bitmap,
-        hasher::{Grafting, Standard},
+        grafting::Hasher as GraftingHasher,
+        hasher::Standard,
         iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        verification::Proof as MmrProof,
+        HistoricalBitmap, Proof as MmrProof,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -192,7 +193,7 @@ where
         let bitmap_pruned_pos = leaf_num_to_pos(pruned_bits);
         let mmr_pruned_leaves = leaf_pos_to_num(mmr_pruned_pos).unwrap();
 
-        let mut grafter = Grafting::new(
+        let mut grafter = GraftingHasher::new(
             &mut hasher,
             current::Current::<E, K, V, H, T, N>::grafting_height(),
         );
@@ -213,7 +214,7 @@ where
         // Build the snapshot from the log
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        let inactivity_floor_loc = fixed::Any::<E, K, V, H, T>::build_snapshot_from_log(
+        fixed::Any::<E, K, V, H, T>::build_snapshot_from_log(
             start_leaf_num,
             &log,
             &mut snapshot,
@@ -226,25 +227,18 @@ where
             .await?;
         status.sync(&mut grafter).await?;
 
-        let target_prune_loc = inactivity_floor_loc.saturating_sub(db_config.pruning_delay);
-        if target_prune_loc > start_leaf_num {
-            mmr.prune_to_pos(grafter.standard(), leaf_num_to_pos(target_prune_loc))
-                .await?;
-        }
-
         let any = fixed::Any {
             mmr,
             log,
             snapshot,
-            inactivity_floor_loc,
+            inactivity_floor_loc: lower_bound,
             uncommitted_ops: 0,
             hasher: Standard::<H>::new(),
-            pruning_delay: db_config.pruning_delay,
         };
 
         let current = Self {
             any,
-            status,
+            status: HistoricalBitmap::from_bitmap(status),
             context,
             bitmap_metadata_partition: db_config.bitmap_metadata_partition,
         };
@@ -338,9 +332,7 @@ where
         let db = self.read().await;
         let mut hasher = H::new();
 
-        let (proof, ops, chunks) = db
-            .range_proof(&mut hasher, start_loc, max_data.get())
-            .await?;
+        let (proof, ops, chunks) = db.range_proof(&mut hasher, start_loc, max_data).await?;
 
         let sync_proof = Proof { proof, chunks };
 
@@ -406,7 +398,6 @@ mod tests {
             translator: TwoCap,
             thread_pool: None,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-            pruning_delay: 10,
         }
     }
 
@@ -571,7 +562,6 @@ mod tests {
             let final_synced_op_count = got_db.op_count();
             let final_synced_inactivity_floor = got_db.any.inactivity_floor_loc;
             let final_synced_log_size = got_db.any.log.size().await.unwrap();
-            let final_synced_oldest_retained_loc = got_db.oldest_retained_loc();
             let final_synced_pruned_to_pos = got_db.any.mmr.pruned_to_pos();
             let final_synced_root = got_db.root(&mut hasher).await.unwrap();
 
@@ -593,10 +583,6 @@ mod tests {
             assert_eq!(
                 reopened_db.any.log.size().await.unwrap(),
                 final_synced_log_size
-            );
-            assert_eq!(
-                reopened_db.oldest_retained_loc(),
-                final_synced_oldest_retained_loc
             );
             assert_eq!(
                 reopened_db.any.mmr.pruned_to_pos(),
