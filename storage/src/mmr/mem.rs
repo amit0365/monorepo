@@ -85,16 +85,6 @@ impl<H: CHasher> Default for Mmr<H> {
     }
 }
 
-// impl<H: CHasher> Builder<H> for Mmr<H> {
-//     async fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Result<u64, Error> {
-//         Ok(self.add(hasher, element))
-//     }
-
-//     fn root(&self, hasher: &mut impl Hasher<H>) -> H::Digest {
-//         self.root(hasher)
-//     }
-// }
-
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
