@@ -142,6 +142,11 @@ impl<H: CHasher> GraftingComputation<H> {
     pub fn standard_hasher(&mut self) -> &mut StandardHasher<H> {
         &mut self.hasher
     }
+
+    /// Get the grafting height.
+    pub fn grafting_height(&self) -> u32 {
+        self.grafting_height
+    }
 }
 
 pub struct Hasher<'a, H: CHasher> {
@@ -390,7 +395,7 @@ impl<H: CHasher> HasherTrait<H> for HasherFork<'_, H> {
 /// A [Hasher] implementation to use when verifying proofs over GraftedStorage.
 pub struct Verifier<'a, H: CHasher> {
     hasher: StandardHasher<H>,
-    height: u32,
+    computation: GraftingComputation<H>,
 
     /// The required leaf elements from the peak tree that we are verifying.
     elements: Vec<&'a [u8]>,
@@ -403,7 +408,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     pub fn new(height: u32, num: u64, elements: Vec<&'a [u8]>) -> Self {
         Self {
             hasher: StandardHasher::new(),
-            height,
+            computation: GraftingComputation::new(height),
             elements,
             num,
         }
@@ -422,7 +427,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
     fn fork(&self) -> impl HasherTrait<H> {
         Verifier {
             hasher: StandardHasher::new(),
-            height: self.height,
+            computation: GraftingComputation::new(self.computation.grafting_height()),
             elements: self.elements.clone(),
             num: self.num,
         }
@@ -434,46 +439,17 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
         left_digest: &H::Digest,
         right_digest: &H::Digest,
     ) -> H::Digest {
-        let digest = self.hasher.node_digest(pos, left_digest, right_digest);
-        if pos_to_height(pos) != self.height {
-            // If we're not at the grafting boundary we use the digest as-is.
-            return digest;
+        let base_digest = self.hasher.node_digest(pos, left_digest, right_digest);
+        
+        if !self.computation.is_grafting_boundary(pos) {
+            return base_digest;
         }
 
-        // This base tree node corresponds to a peak-tree leaf, so we need to perform the peak-tree
-        // leaf digest computation.
-        let source_pos = source_pos(pos, self.height);
-        let Some(source_pos) = source_pos else {
-            // malformed proof input
-            debug!(pos, "no grafting source pos");
-            return digest;
+        let Some(chunk_index) = self.computation.get_chunk_index(pos, self.num, self.elements.len()) else {
+            return base_digest;
         };
-        let index = leaf_pos_to_num(source_pos);
-        let Some(mut index) = index else {
-            // malformed proof input
-            debug!(pos = source_pos, "grafting source pos is not a leaf");
-            return digest;
-        };
-        if index < self.num {
-            // malformed proof input
-            debug!(index, num = self.num, "grafting index is negative");
-            return digest;
-        };
-        index -= self.num;
-        if index >= self.elements.len() as u64 {
-            // malformed proof input
-            debug!(
-                index,
-                len = self.elements.len(),
-                "grafting index is out of bounds"
-            );
-            return digest;
-        }
-        self.hasher
-            .update_with_element(self.elements[index as usize]);
-        self.hasher.update_with_digest(&digest);
 
-        self.hasher.finalize()
+        self.computation.apply_grafting(&base_digest, self.elements[chunk_index])
     }
 
     fn root<'a>(
