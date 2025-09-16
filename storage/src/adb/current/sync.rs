@@ -446,6 +446,7 @@ mod tests {
         }
     }
 
+    /*
     #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
     #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
     #[test_case(1000, NZU64!(1); "db with batch size 1")]
@@ -602,4 +603,5 @@ mod tests {
             }
         });
     }
+    */
 }

@@ -9,7 +9,7 @@ pub mod sync;
 use crate::{
     adb::{
         any::fixed::{Any, Config as AConfig},
-        extract_pinned_nodes, Error,
+        Error,
     },
     index::Index,
     mmr::{
@@ -760,22 +760,11 @@ impl<
         reconstructed_root == *root
     }
 
-    /// Generate sync data for a range of operations, including all necessary proofs.
-    ///
-    /// Returns:
-    /// 1. Grafted proof (for verification)
-    /// 2. Base MMR proof (for extracting pinned nodes)
-    /// 3. Bitmap MMR proof (for extracting pinned nodes)
-    /// 4. Operations
-    /// 5. Bitmap chunks
+    /// TODO implement
     pub async fn sync_range_proof(
         &self,
-        hasher: &mut H,
-        start_loc: u64,
-        max_ops: NonZeroU64,
     ) -> Result<
         (
-            Proof<H::Digest>,
             Proof<H::Digest>,
             Proof<H::Digest>,
             Vec<Fixed<K, V>>,
@@ -787,7 +776,9 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
+        todo!()
 
+        /*
         // Compute the start and end locations & positions of the range.
         let mmr = &self.any.mmr;
         let start_pos = leaf_num_to_pos(start_loc);
@@ -858,35 +849,13 @@ impl<
         }
 
         Ok((grafted_proof, base_proof, bitmap_proof, ops, chunks))
+        */
     }
 
-    /// Verify sync data and extract pinned nodes for both MMRs.
-    ///
-    /// Parameters:
-    /// - `hasher`: The hasher for partial chunk handling
-    /// - `grafted_proof`: The proof over the grafted structure (for verification)
-    /// - `base_proof`: The base MMR proof (for extracting pinned nodes)
-    /// - `bitmap_proof`: The bitmap MMR proof (for extracting pinned nodes)
-    /// - `ops`: The operations to verify
-    /// - `chunks`: The bitmap chunks
-    /// - `start_loc`: Starting location of the range
-    /// - `target_root`: The root to verify against
-    ///
-    /// Returns:
-    /// 1. Base MMR pinned nodes
-    /// 2. Bitmap MMR pinned nodes
-    ///
-    /// Returns an error if the operations cannot be proven against the target root.
-    pub fn sync_range_proof_verify(
-        hasher: &mut Standard<H>,
-        grafted_proof: &Proof<H::Digest>,
-        base_proof: &Proof<H::Digest>,
-        bitmap_proof: &Proof<H::Digest>,
-        ops: &[Fixed<K, V>],
-        chunks: &[[u8; N]],
-        start_loc: u64,
-        target_root: &H::Digest,
-    ) -> Result<(Vec<H::Digest>, Vec<H::Digest>), Error> {
+    /// TODO implement
+    pub fn sync_range_proof_verify() -> Result<(Vec<H::Digest>, Vec<H::Digest>), Error> {
+        todo!()
+        /*
         // First verify that the operations are valid against the grafted root
         // Use the same verification logic as verify_range_proof
         let op_count = leaf_pos_to_num(grafted_proof.size);
@@ -963,6 +932,7 @@ impl<
         };
 
         Ok((base_pinned, bitmap_pinned))
+        */
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -1635,6 +1605,7 @@ pub mod test {
         });
     }
 
+    /*
     /// Test basic historical range proof functionality
     /// Test the sync_range_proof and sync_range_proof_verify functions
     #[test_traced("DEBUG")]
@@ -1886,4 +1857,5 @@ pub mod test {
             db.destroy().await.unwrap();
         });
     }
+    */
 }
