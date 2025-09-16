@@ -69,6 +69,81 @@ use futures::future::try_join_all;
 use std::collections::HashMap;
 use tracing::debug;
 
+/// Core grafting computation logic that can be reused by different verifier implementations.
+///
+/// This struct contains the essential grafting algorithm extracted from the existing
+/// GraftingVerifier to enable code reuse without behavior changes.
+pub struct GraftingComputation<H: CHasher> {
+    hasher: StandardHasher<H>,
+    grafting_height: u32,
+}
+
+impl<H: CHasher> GraftingComputation<H> {
+    /// Create a new grafting computation instance.
+    pub fn new(grafting_height: u32) -> Self {
+        Self {
+            hasher: StandardHasher::new(),
+            grafting_height,
+        }
+    }
+
+    /// Check if a position is at the grafting boundary.
+    ///
+    /// Returns true if the node at the given position should have grafting applied.
+    pub fn is_grafting_boundary(&self, pos: u64) -> bool {
+        pos_to_height(pos) == self.grafting_height
+    }
+
+    /// Apply grafting transformation to a base digest using chunk data.
+    ///
+    /// This is the core grafting computation: hash(chunk_data || base_digest).
+    /// The hasher state is updated and finalized to produce the grafted digest.
+    pub fn apply_grafting(&mut self, base_digest: &H::Digest, chunk_data: &[u8]) -> H::Digest {
+        self.hasher.update_with_element(chunk_data);
+        self.hasher.update_with_digest(base_digest);
+        self.hasher.finalize()
+    }
+
+    /// Get the chunk index for a given base MMR position.
+    ///
+    /// This handles the position mapping and bounds checking logic extracted from
+    /// the existing Verifier::node_digest method. Returns the index of the chunk
+    /// that corresponds to the given base MMR position, or None if the position
+    /// is invalid or out of bounds.
+    ///
+    /// # Arguments
+    /// * `pos` - The base MMR position
+    /// * `start_num` - The leaf number of the first element being verified
+    /// * `max_elements` - The maximum number of elements available
+    pub fn get_chunk_index(&self, pos: u64, start_num: u64, max_elements: usize) -> Option<usize> {
+        // This logic is extracted verbatim from the existing Verifier::node_digest method
+        let source_pos = source_pos(pos, self.grafting_height)?;
+
+        let index = leaf_pos_to_num(source_pos)?;
+        if index < start_num {
+            debug!(index, num = start_num, "grafting index is negative");
+            return None;
+        }
+
+        let adjusted_index = index - start_num;
+        if adjusted_index >= max_elements as u64 {
+            debug!(
+                index = adjusted_index,
+                len = max_elements,
+                "grafting index is out of bounds"
+            );
+            return None;
+        }
+
+        Some(adjusted_index as usize)
+    }
+
+    /// Access the underlying StandardHasher for non-grafting operations.
+    pub fn standard_hasher(&mut self) -> &mut StandardHasher<H> {
+        &mut self.hasher
+    }
+}
+
 pub struct Hasher<'a, H: CHasher> {
     hasher: &'a mut StandardHasher<H>,
     height: u32,
@@ -911,5 +986,80 @@ mod tests {
                 .unwrap();
             assert!(proof.verify_element_inclusion(&mut verifier, &b5, pos, &grafted_storage_root));
         });
+    }
+
+    #[test]
+    fn test_grafting_computation_is_grafting_boundary() {
+        let computation = GraftingComputation::<Sha256>::new(2);
+
+        // Test nodes at height 2 (grafting boundary)
+        assert!(computation.is_grafting_boundary(6)); // height 2 node
+        assert!(computation.is_grafting_boundary(13)); // height 2 node
+
+        // Test nodes not at grafting boundary
+        assert!(!computation.is_grafting_boundary(2)); // height 1 node
+        assert!(!computation.is_grafting_boundary(0)); // height 0 node
+        assert!(!computation.is_grafting_boundary(14)); // height 3 node
+    }
+
+    #[test]
+    fn test_grafting_computation_apply_grafting() {
+        let mut computation = GraftingComputation::<Sha256>::new(2);
+
+        // Create test base digest and chunk data using proper digest type
+        let base_digest = test_digest::<Sha256>(1);
+        let chunk_data = b"test_chunk_data";
+
+        // Apply grafting transformation
+        let result = computation.apply_grafting(&base_digest, chunk_data);
+
+        // Verify it produces a different digest than the base
+        assert_ne!(result, base_digest);
+
+        // Verify it's deterministic
+        let result2 = computation.apply_grafting(&base_digest, chunk_data);
+        assert_eq!(result, result2);
+
+        // Verify different chunk data produces different result
+        let different_chunk = b"different_chunk";
+        let result3 = computation.apply_grafting(&base_digest, different_chunk);
+        assert_ne!(result, result3);
+    }
+
+    #[test]
+    fn test_grafting_computation_get_chunk_index_valid_cases() {
+        let computation = GraftingComputation::<Sha256>::new(2);
+
+        // Test valid chunk index calculation for grafting height 2
+        // These test cases are based on the MMR structure where nodes 6 and 13
+        // are at height 2 and should map to chunk indices 0 and 1 respectively
+        let index = computation.get_chunk_index(6, 0, 2);
+        assert_eq!(index, Some(0));
+
+        let index = computation.get_chunk_index(13, 0, 2);
+        assert_eq!(index, Some(1));
+    }
+
+    #[test]
+    fn test_grafting_computation_get_chunk_index_out_of_bounds() {
+        let computation = GraftingComputation::<Sha256>::new(2);
+
+        // Test out of bounds - not enough elements
+        let index = computation.get_chunk_index(13, 0, 1);
+        assert_eq!(index, None);
+
+        // Test negative index (start_num too high)
+        let index = computation.get_chunk_index(6, 1, 2);
+        assert_eq!(index, None);
+    }
+
+    #[test]
+    fn test_grafting_computation_get_chunk_index_invalid_positions() {
+        let computation = GraftingComputation::<Sha256>::new(2);
+
+        // Test positions that don't correspond to valid source positions
+        // Position 2 is at height 1, not height 2, so source_pos should return None
+        let index = computation.get_chunk_index(2, 0, 10);
+        assert_eq!(index, None);
     }
 }
