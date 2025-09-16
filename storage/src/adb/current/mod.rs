@@ -604,10 +604,10 @@ impl<
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let mut verifier = GraftingVerifier::<H>::new(
+        let mut verifier = GraftingVerifier::<H, &[u8]>::new(
             Self::grafting_height(),
             start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
-            chunk_vec,
+            &chunk_vec,
         );
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
@@ -711,8 +711,9 @@ impl<
 
         let pos = leaf_num_to_pos(info.loc);
         let num = info.loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let chunk_slice = [info.chunk];
         let mut verifier =
-            GraftingVerifier::<H>::new(Self::grafting_height(), num, vec![&info.chunk]);
+            GraftingVerifier::<H, [u8; N]>::new(Self::grafting_height(), num, &chunk_slice);
         let element = Fixed::Update(info.key.clone(), info.value.clone()).encode();
 
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
@@ -871,10 +872,10 @@ impl<
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let mut verifier = GraftingVerifier::<H>::new(
+        let mut verifier = GraftingVerifier::<H, &[u8]>::new(
             Self::grafting_height(),
             start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
-            chunk_vec,
+            &chunk_vec,
         );
 
         // Handle partial chunk case (same as verify_range_proof)
