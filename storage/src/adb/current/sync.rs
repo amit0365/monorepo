@@ -325,11 +325,14 @@ where
         let db = self.read().await;
         let mut hasher = H::new();
 
-        let (proof, ops, chunks) = db
+        let (base_proof, _bitmap_proof, ops, chunks) = db
             .historical_range_proof(&mut hasher, size, start_loc, max_data)
             .await?;
 
-        let sync_proof = Proof { proof, chunks };
+        let sync_proof = Proof {
+            proof: base_proof,
+            chunks,
+        };
 
         let (success_tx, _success_rx) = futures::channel::oneshot::channel();
 

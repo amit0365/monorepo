@@ -498,82 +498,6 @@ impl<
     /// * The historical state is not available in the cache
     /// * The range is invalid for the historical state
     /// * There are uncommitted operations
-    pub async fn historical_range_proof(
-        &self,
-        hasher: &mut H,
-        historical_log_size: u64,
-        start_loc: u64,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Fixed<K, V>>, Vec<[u8; N]>), Error> {
-        assert!(
-            !self.status.is_dirty(),
-            "must process updates before computing proofs"
-        );
-
-        // Validate that the range is within the historical state
-        if start_loc >= historical_log_size {
-            return Err(Error::OperationPruned(start_loc));
-        }
-
-        // Get the historical bitmap state
-        let historical_bitmap = self
-            .status
-            .get_state(historical_log_size)
-            .ok_or_else(|| Error::Mmr(crate::mmr::Error::ElementPruned(historical_log_size)))?;
-
-        // Check that the range is still available in the current MMR (not pruned)
-        let mmr = &self.any.mmr;
-
-        let end_loc = std::cmp::min(start_loc + max_ops.get() - 1, historical_log_size - 1);
-
-        // Create a grafted MMR using the historical bitmap state
-        let start_pos = leaf_num_to_pos(start_loc);
-        let end_pos = leaf_num_to_pos(end_loc);
-        let height = Self::grafting_height();
-        let historical_mmr_size = leaf_num_to_pos(historical_log_size);
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(historical_bitmap, mmr, height);
-
-        // Generate the proof using the grafted MMR with historical bitmap
-        let mut proof = verification::historical_range_proof(
-            &grafted_mmr,
-            historical_mmr_size,
-            start_pos,
-            end_pos,
-        )
-        .await?;
-
-        // Read the operations from the log (these are immutable historical records)
-        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
-        let futures = (start_loc..=end_loc)
-            .map(|i| self.any.log.read(i))
-            .collect::<Vec<_>>();
-        try_join_all(futures)
-            .await?
-            .into_iter()
-            .for_each(|op| ops.push(op));
-
-        // Gather the chunks necessary to verify the proof from the historical bitmap
-        let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
-        let start_chunk = start_loc / chunk_bits;
-        let end_chunk = end_loc / chunk_bits;
-        let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
-        for i in start_chunk..=end_chunk {
-            let bit_offset = i * chunk_bits;
-            let chunk = *historical_bitmap.get_chunk(bit_offset);
-            chunks.push(chunk);
-        }
-
-        // Handle partial chunks in the historical state
-        let last_chunk = historical_bitmap.last_chunk();
-        if last_chunk.1 == 0 {
-            return Ok((proof, ops, chunks));
-        }
-
-        hasher.update(last_chunk.0);
-        proof.digests.push(hasher.finalize());
-
-        Ok((proof, ops, chunks))
-    }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
@@ -818,7 +742,7 @@ impl<
     /// * The historical state is not available in the cache
     /// * The range is invalid for the historical state
     /// * There are uncommitted operations
-    pub async fn sync_range_proof(
+    pub async fn historical_range_proof(
         &self,
         hasher: &mut H,
         historical_log_size: u64,
@@ -948,7 +872,7 @@ impl<
     /// This function uses the base proof structure as a foundation and applies grafting
     /// transformations using the bitmap chunks to reconstruct verification capability
     /// equivalent to a grafted proof, then delegates to existing verification logic.
-    pub fn sync_range_proof_verify(
+    pub fn historical_range_proof_verify(
         base_proof: &Proof<H::Digest>,
         bitmap_proof: &Proof<H::Digest>,
         ops: &[Fixed<K, V>],
@@ -1752,7 +1676,7 @@ pub mod test {
     /// Test basic historical range proof functionality
     /// Test the sync_range_proof and sync_range_proof_verify functions
     #[test_traced("DEBUG")]
-    pub fn test_sync_range_proof() {
+    pub fn test_historical_range_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "sync_range_proof_test";
@@ -1773,8 +1697,8 @@ pub mod test {
             // Test 1: Generate sync proofs for a range
             let start_loc = 5;
             let max_ops = NZU64!(5);
-            let (grafted_proof, base_proof, bitmap_proof, ops, chunks) = db
-                .sync_range_proof(hasher.inner(), start_loc, max_ops)
+            let (base_proof, bitmap_proof, ops, chunks) = db
+                .historical_range_proof(hasher.inner(), start_loc, max_ops)
                 .await
                 .unwrap();
 
@@ -1782,7 +1706,7 @@ pub mod test {
             assert_eq!(ops.len(), 5);
 
             // Test 2: Verify the sync proofs and extract pinned nodes
-            let result = CurrentTest::sync_range_proof_verify(
+            let result = CurrentTest::historical_range_proof_verify(
                 &mut hasher,
                 &grafted_proof,
                 &base_proof,
@@ -1805,7 +1729,7 @@ pub mod test {
 
             // Test 3: Verify failure with wrong root
             let wrong_root = Sha256::fill(0xFF);
-            let result = CurrentTest::sync_range_proof_verify(
+            let result = CurrentTest::historical_range_proof_verify(
                 &mut hasher,
                 &grafted_proof,
                 &base_proof,
@@ -1820,7 +1744,7 @@ pub mod test {
             // Test 4: Verify failure with modified operations
             let mut bad_ops = ops.clone();
             bad_ops[0] = Fixed::Delete(Sha256::fill(0xAA));
-            let result = CurrentTest::sync_range_proof_verify(
+            let result = CurrentTest::historical_range_proof_verify(
                 &mut hasher,
                 &grafted_proof,
                 &base_proof,
@@ -1845,11 +1769,11 @@ pub mod test {
             // Test at chunk boundary (assuming chunk size is 256 bits = 32 bytes)
             let chunk_boundary_start = 256;
             let (grafted_proof2, base_proof2, bitmap_proof2, ops2, chunks2) = db
-                .sync_range_proof(hasher.inner(), chunk_boundary_start, NZU64!(4))
+                .historical_range_proof(hasher.inner(), chunk_boundary_start, NZU64!(4))
                 .await
                 .unwrap();
 
-            let result2 = CurrentTest::sync_range_proof_verify(
+            let result2 = CurrentTest::historical_range_proof_verify(
                 &mut hasher,
                 &grafted_proof2,
                 &base_proof2,
@@ -1892,8 +1816,8 @@ pub mod test {
             let inactivity_floor = db.inactivity_floor_loc();
             let start_loc = std::cmp::max(400, inactivity_floor); // Start from 400 or floor, whichever is higher
             let max_ops = NZU64!(150); // Get 150 operations
-            let (grafted_proof, base_proof, bitmap_proof, ops, chunks) = db
-                .sync_range_proof(hasher.inner(), start_loc, max_ops)
+            let (base_proof, bitmap_proof, ops, chunks) = db
+                .historical_range_proof(hasher.inner(), start_loc, max_ops)
                 .await
                 .unwrap();
 
@@ -1902,7 +1826,7 @@ pub mod test {
             assert!(ops.len() <= 150, "Should not exceed max_ops");
 
             // Verify the proofs
-            let result = CurrentTest::sync_range_proof_verify(
+            let result = CurrentTest::historical_range_proof_verify(
                 &mut hasher,
                 &grafted_proof,
                 &base_proof,
@@ -2026,7 +1950,7 @@ pub mod test {
             let max_ops = NZU64!(4); // Operations 2, 3, 4, 5
 
             let (base_proof, bitmap_proof, ops, chunks) = db
-                .sync_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
+                .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
                 .await
                 .unwrap();
 
@@ -2040,7 +1964,7 @@ pub mod test {
             println!("Chunks: {}", chunks.len());
 
             // Test Case 2: Verify the dual MMR proof against the target root
-            let verification_result = CurrentTest::sync_range_proof_verify(
+            let verification_result = CurrentTest::historical_range_proof_verify(
                 &base_proof,
                 &bitmap_proof,
                 &ops,
@@ -2053,7 +1977,7 @@ pub mod test {
 
             // Test Case 3: Compare with traditional grafted proof verification
             // Generate a traditional grafted proof for the same range
-            let (traditional_proof, traditional_ops, traditional_chunks) = db
+            let (traditional_base_proof, _traditional_bitmap_proof, traditional_ops, traditional_chunks) = db
                 .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
                 .await
                 .unwrap();
@@ -2061,7 +1985,7 @@ pub mod test {
             // Verify traditional proof works
             let traditional_verification = CurrentTest::verify_range_proof(
                 &mut hasher,
-                &traditional_proof,
+                &traditional_base_proof,
                 start_loc,
                 &traditional_ops,
                 &traditional_chunks,
@@ -2078,7 +2002,7 @@ pub mod test {
             let mut wrong_hasher = Standard::<Sha256>::new();
             let wrong_root = wrong_hasher.finalize(); // Random wrong root
 
-            let invalid_verification = CurrentTest::sync_range_proof_verify(
+            let invalid_verification = CurrentTest::historical_range_proof_verify(
                 &base_proof,
                 &bitmap_proof,
                 &ops,
@@ -2094,11 +2018,11 @@ pub mod test {
             let single_max = NZU64!(1);
 
             let (single_base, single_bitmap, single_ops, single_chunks) = db
-                .sync_range_proof(hasher.inner(), historical_log_size, single_start, single_max)
+                .historical_range_proof(hasher.inner(), historical_log_size, single_start, single_max)
                 .await
                 .unwrap();
 
-            let single_verification = CurrentTest::sync_range_proof_verify(
+            let single_verification = CurrentTest::historical_range_proof_verify(
                 &single_base,
                 &single_bitmap,
                 &single_ops,
@@ -2115,11 +2039,11 @@ pub mod test {
             let last_max = NZU64!(2);
 
             let (last_base, last_bitmap, last_ops, last_chunks) = db
-                .sync_range_proof(hasher.inner(), historical_log_size, last_start, last_max)
+                .historical_range_proof(hasher.inner(), historical_log_size, last_start, last_max)
                 .await
                 .unwrap();
 
-            let last_verification = CurrentTest::sync_range_proof_verify(
+            let last_verification = CurrentTest::historical_range_proof_verify(
                 &last_base,
                 &last_bitmap,
                 &last_ops,
@@ -2162,7 +2086,7 @@ pub mod test {
             let max_ops = NZU64!(3); // Operations 2, 3, 4, 5
 
             let (base_proof, bitmap_proof, ops, chunks) = db
-                .sync_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
+                .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
                 .await
                 .unwrap();
 
@@ -2187,7 +2111,7 @@ pub mod test {
             println!("Chunks: {}", chunks.len());
 
             // Test Case 2: Verify the dual MMR proof against the target root
-            let verification_result = CurrentTest::sync_range_proof_verify(
+            let verification_result = CurrentTest::historical_range_proof_verify(
                 &base_proof,
                 &bitmap_proof,
                 &ops,
@@ -2203,7 +2127,12 @@ pub mod test {
 
             // Test Case 3: Compare with traditional grafted proof verification
             // Generate a traditional grafted proof for the same range
-            let (traditional_proof, traditional_ops, traditional_chunks) = db
+            let (
+                traditional_base_proof,
+                _traditional_bitmap_proof,
+                traditional_ops,
+                traditional_chunks,
+            ) = db
                 .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
                 .await
                 .unwrap();
@@ -2217,24 +2146,24 @@ pub mod test {
             );
             println!(
                 "  Traditional proof: size={}, digests={}",
-                traditional_proof.size,
-                traditional_proof.digests.len()
+                traditional_base_proof.size,
+                traditional_base_proof.digests.len()
             );
             println!(
                 "  Sizes match: {}",
-                base_proof.size == traditional_proof.size
+                base_proof.size == traditional_base_proof.size
             );
             println!(
                 "  Digest counts match: {}",
-                base_proof.digests.len() == traditional_proof.digests.len()
+                base_proof.digests.len() == traditional_base_proof.digests.len()
             );
-            // Verify traditional proof works
-            let traditional_verification = CurrentTest::verify_range_proof(
-                &mut hasher,
-                &traditional_proof,
-                start_loc,
+            // Verify traditional proof works (now using the same dual MMR verification)
+            let traditional_verification = CurrentTest::historical_range_proof_verify(
+                &traditional_base_proof,
+                &_traditional_bitmap_proof,
                 &traditional_ops,
                 &traditional_chunks,
+                start_loc,
                 &target_root,
             );
 
@@ -2254,7 +2183,7 @@ pub mod test {
             let mut wrong_hasher = Standard::<Sha256>::new();
             let wrong_root = wrong_hasher.finalize(); // Random wrong root
 
-            let invalid_verification = CurrentTest::sync_range_proof_verify(
+            let invalid_verification = CurrentTest::historical_range_proof_verify(
                 &base_proof,
                 &bitmap_proof,
                 &ops,
@@ -2273,7 +2202,7 @@ pub mod test {
             let single_max = NZU64!(1);
 
             let (single_base, single_bitmap, single_ops, single_chunks) = db
-                .sync_range_proof(
+                .historical_range_proof(
                     hasher.inner(),
                     historical_log_size,
                     single_start,
@@ -2282,7 +2211,7 @@ pub mod test {
                 .await
                 .unwrap();
 
-            let single_verification = CurrentTest::sync_range_proof_verify(
+            let single_verification = CurrentTest::historical_range_proof_verify(
                 &single_base,
                 &single_bitmap,
                 &single_ops,
@@ -2302,11 +2231,11 @@ pub mod test {
             let last_max = NZU64!(2);
 
             let (last_base, last_bitmap, last_ops, last_chunks) = db
-                .sync_range_proof(hasher.inner(), historical_log_size, last_start, last_max)
+                .historical_range_proof(hasher.inner(), historical_log_size, last_start, last_max)
                 .await
                 .unwrap();
 
-            let last_verification = CurrentTest::sync_range_proof_verify(
+            let last_verification = CurrentTest::historical_range_proof_verify(
                 &last_base,
                 &last_bitmap,
                 &last_ops,
