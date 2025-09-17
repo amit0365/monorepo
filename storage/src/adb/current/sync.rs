@@ -99,7 +99,6 @@ where
     type PinnedNodes = Vec<H::Digest>;
     type Journal = Journal<E, K, V>;
     type Hasher = H;
-    type Error = adb::Error;
     type Config = current::Config<T>;
     type Digest = H::Digest;
 
@@ -108,7 +107,7 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, <Self::Journal as sync::Journal>::Error> {
+    ) -> Result<Self::Journal, adb::Error> {
         let journal_config = fixed_journal::Config {
             partition: config.log_journal_partition.clone(),
             items_per_blob: config.log_items_per_blob,
@@ -135,7 +134,7 @@ where
         lower_bound: u64,
         upper_bound: u64,
         apply_batch_size: usize,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, adb::Error> {
         let log = log.into_inner();
         // Initialize the MMR with sync configuration
         let mut mmr = crate::mmr::journaled::Mmr::init_sync(
@@ -154,8 +153,7 @@ where
                 pinned_nodes,
             },
         )
-        .await
-        .map_err(adb::Error::Mmr)?;
+        .await?;
 
         // Convert MMR size to number of operations
         let Some(mmr_ops) = leaf_pos_to_num(mmr.size()) else {
@@ -258,24 +256,19 @@ where
         config: &Self::Config,
         lower_bound: u64,
         upper_bound: u64,
-    ) -> Result<Self::Journal, Self::Error> {
+    ) -> Result<Self::Journal, adb::Error> {
         let mut inner_journal = journal.into_inner();
-        let size = inner_journal.size().await.map_err(adb::Error::from)?;
+        let size = inner_journal.size().await?;
 
         if size <= lower_bound {
             // Close the existing journal before creating a new one
-            inner_journal.close().await.map_err(adb::Error::from)?;
+            inner_journal.close().await?;
 
             // Create a new journal with the new bounds
-            Self::create_journal(context, config, lower_bound, upper_bound)
-                .await
-                .map_err(adb::Error::from)
+            Self::create_journal(context, config, lower_bound, upper_bound).await
         } else {
             // Just prune to the lower bound
-            inner_journal
-                .prune(lower_bound)
-                .await
-                .map_err(adb::Error::from)?;
+            inner_journal.prune(lower_bound).await?;
             Ok(Journal::new(inner_journal))
         }
     }
@@ -301,7 +294,7 @@ where
         proof: &Self::Proof,
         start_loc: u64,
         data_len: u64,
-    ) -> Result<Self::PinnedNodes, Self::Error> {
+    ) -> Result<Self::PinnedNodes, adb::Error> {
         let pinned_nodes = adb::extract_pinned_nodes(&proof.proof, start_loc, data_len)?;
         Ok(pinned_nodes)
     }
