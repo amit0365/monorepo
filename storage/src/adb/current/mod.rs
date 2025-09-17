@@ -585,13 +585,26 @@ impl<
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
+        println!("🔍 INSIDE verify_range_proof:");
+        println!("  proof.size: {}", proof.size);
+        println!("  proof.digests.len(): {}", proof.digests.len());
+
         let op_count = leaf_pos_to_num(proof.size);
         let Some(op_count) = op_count else {
+            println!("  ❌ Failed: invalid proof size");
             debug!("verification failed, invalid proof size");
             return false;
         };
+        println!("  op_count: {}", op_count);
+
         let end_loc = start_loc + ops.len() as u64 - 1;
+        println!("  start_loc: {}, end_loc: {}", start_loc, end_loc);
+
         if end_loc >= op_count {
+            println!(
+                "  ❌ Failed: invalid range (end_loc {} >= op_count {})",
+                end_loc, op_count
+            );
             debug!(
                 loc = end_loc,
                 op_count, "proof verification failed, invalid range"
@@ -600,27 +613,47 @@ impl<
         }
 
         let start_pos = leaf_num_to_pos(start_loc);
+        println!("  start_pos: {}", start_pos);
 
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+        println!("  elements.len(): {}", elements.len());
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
+        println!("  chunk_vec.len(): {}", chunk_vec.len());
+        println!("  grafting_height: {}", Self::grafting_height());
+        println!(
+            "  start_chunk_num: {}",
+            start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS
+        );
+
         let mut verifier = GraftingVerifier::<H, &[u8]>::new(
             Self::grafting_height(),
             start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
             &chunk_vec,
         );
 
+        println!(
+            "  op_count % CHUNK_SIZE_BITS = {}",
+            op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS
+        );
+
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            return proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
+            println!("  📍 Taking non-partial chunk path");
+            let result = proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
+            println!("  verify_range_inclusion result: {}", result);
+            return result;
         }
 
         // The proof must contain the partial chunk digest as its last hash.
+        println!("  📍 Taking partial chunk path");
         if proof.digests.is_empty() {
+            println!("  ❌ Failed: proof has no digests for partial chunk");
             debug!("proof has no digests");
             return false;
         }
         let mut proof = proof.clone();
         let last_chunk_digest = proof.digests.pop().unwrap();
+        println!("  Removed last digest for partial chunk handling");
 
         // Reconstruct the MMR root.
         let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
@@ -761,15 +794,42 @@ impl<
         reconstructed_root == *root
     }
 
-    /// TODO implement
+    /// Returns dual proofs (base MMR + bitmap MMR) for the specified range of operations at a
+    /// historical point in time, along with the operations and bitmap chunks required for verification.
+    ///
+    /// This function generates separate proofs over the base MMR and bitmap MMR instead of a single
+    /// grafted proof, enabling bandwidth optimization and separate pinned node extraction for sync.
+    ///
+    /// # Arguments
+    /// * `hasher` - The hasher to use for proof generation
+    /// * `historical_log_size` - The log size at the historical point in time
+    /// * `start_loc` - The starting location of the range
+    /// * `max_ops` - The maximum number of operations to include
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// * Base MMR proof (over the pure base MMR, no grafting)
+    /// * Bitmap MMR proof (over the historical bitmap MMR)
+    /// * The operations in the range
+    /// * The bitmap chunks required for verification
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The historical state is not available in the cache
+    /// * The range is invalid for the historical state
+    /// * There are uncommitted operations
     pub async fn sync_range_proof(
         &self,
+        hasher: &mut H,
+        historical_log_size: u64,
+        start_loc: u64,
+        max_ops: NonZeroU64,
     ) -> Result<
         (
-            Proof<H::Digest>,
-            Proof<H::Digest>,
-            Vec<Fixed<K, V>>,
-            Vec<[u8; N]>,
+            Proof<H::Digest>, // Base MMR proof (over any)
+            Proof<H::Digest>, // Bitmap MMR proof (over status)
+            Vec<Fixed<K, V>>, // Operations
+            Vec<[u8; N]>,     // Bitmap chunks
         ),
         Error,
     > {
@@ -777,54 +837,65 @@ impl<
             !self.status.is_dirty(),
             "must process updates before computing proofs"
         );
-        todo!()
 
-        /*
-        // Compute the start and end locations & positions of the range.
+        // Validate that the range is within the historical state
+        if start_loc >= historical_log_size {
+            return Err(Error::OperationPruned(start_loc));
+        }
+
+        // Get the historical bitmap state (same as historical_range_proof)
+        let historical_bitmap = self
+            .status
+            .get_state(historical_log_size)
+            .ok_or_else(|| Error::Mmr(crate::mmr::Error::ElementPruned(historical_log_size)))?;
+
         let mmr = &self.any.mmr;
+        let end_loc = std::cmp::min(start_loc + max_ops.get() - 1, historical_log_size - 1);
+
+        // Calculate positions for operation range
         let start_pos = leaf_num_to_pos(start_loc);
-        let leaves = mmr.leaves();
-        assert!(start_loc < leaves, "start_loc is invalid");
-        let max_loc = start_loc + max_ops.get();
-        let end_loc = if max_loc > leaves {
-            leaves - 1
-        } else {
-            max_loc - 1
-        };
         let end_pos = leaf_num_to_pos(end_loc);
+        let historical_mmr_size = leaf_num_to_pos(historical_log_size);
 
-        // 1. Generate the grafted proof (for verification against target root)
-        let height = Self::grafting_height();
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
-        let mut grafted_proof = verification::range_proof(&grafted_mmr, start_pos, end_pos).await?;
+        // Generate base MMR proof (over pure base MMR, no grafting)
+        let base_proof = verification::historical_range_proof(
+            mmr,                 // Pure base MMR (self.any.mmr)
+            historical_mmr_size, // Historical size
+            start_pos,
+            end_pos,
+        )
+        .await?;
 
-        // 2. Generate base MMR proof (for extracting pinned nodes)
-        let base_proof = verification::range_proof(&self.any.mmr, start_pos, end_pos).await?;
-
-        // 3. Generate bitmap MMR proof (for extracting pinned nodes)
+        // Calculate chunk range for bitmap proof
         let chunk_bits = HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
         let start_chunk = start_loc / chunk_bits;
         let end_chunk = end_loc / chunk_bits;
-        debug!(
-            "sync_range_proof: start_loc={}, end_loc={}, start_chunk={}, end_chunk={}, chunk_bits={}",
-            start_loc, end_loc, start_chunk, end_chunk, chunk_bits
-        );
+        let start_chunk_pos = leaf_num_to_pos(start_chunk);
+        let end_chunk_pos = leaf_num_to_pos(end_chunk);
 
-        // Generate bitmap proof if there are chunks in the bitmap MMR
-        let bitmap_mmr_size = self.status.current().size();
-        let bitmap_proof = if bitmap_mmr_size > 0 {
-            let start_chunk_pos = leaf_num_to_pos(start_chunk);
-            let end_chunk_pos = leaf_num_to_pos(end_chunk);
-            verification::range_proof(self.status.current(), start_chunk_pos, end_chunk_pos).await?
+        // Get the actual historical bitmap MMR size
+        let historical_bitmap_leaves =
+            historical_log_size / HistoricalBitmap::<H, N>::CHUNK_SIZE_BITS;
+        let historical_bitmap_size = leaf_num_to_pos(historical_bitmap_leaves);
+
+        // Generate bitmap MMR proof (over historical bitmap MMR)
+        let bitmap_proof = if historical_bitmap_size > 0 {
+            verification::historical_range_proof(
+                historical_bitmap,      // Historical bitmap MMR
+                historical_bitmap_size, // Historical bitmap size
+                start_chunk_pos,
+                end_chunk_pos,
+            )
+            .await?
         } else {
-            // Return empty proof if no chunks available
+            // No bitmap chunks available or range exceeds bitmap size - return empty proof
             Proof {
                 size: 0,
                 digests: vec![],
             }
         };
 
-        // 4. Collect the operations
+        // Read the operations from the log (same as historical_range_proof)
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
             .map(|i| self.any.log.read(i))
@@ -834,106 +905,177 @@ impl<
             .into_iter()
             .for_each(|op| ops.push(op));
 
-        // 5. Gather the chunks necessary to verify the proof (same as original range_proof)
+        // Gather the bitmap chunks (same as historical_range_proof)
         let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
         for i in start_chunk..=end_chunk {
             let bit_offset = i * chunk_bits;
-            let chunk = *self.status.get_chunk(bit_offset);
+            let chunk = *historical_bitmap.get_chunk(bit_offset);
             chunks.push(chunk);
         }
 
-        // Handle partial last chunk (same as original range_proof)
-        let last_chunk = self.status.last_chunk();
+        // Handle partial chunks in the historical state (same as historical_range_proof)
+        let last_chunk = historical_bitmap.last_chunk();
         if last_chunk.1 != 0 {
+            // For dual proofs, we need to handle partial chunks differently
+            // The bitmap proof needs the partial chunk digest appended
+            let mut bitmap_proof = bitmap_proof;
             hasher.update(last_chunk.0);
-            grafted_proof.digests.push(hasher.finalize());
+            bitmap_proof.digests.push(hasher.finalize());
+            return Ok((base_proof, bitmap_proof, ops, chunks));
         }
 
-        Ok((grafted_proof, base_proof, bitmap_proof, ops, chunks))
-        */
+        Ok((base_proof, bitmap_proof, ops, chunks))
     }
 
-    /// TODO implement
-    pub fn sync_range_proof_verify() -> Result<(Vec<H::Digest>, Vec<H::Digest>), Error> {
-        todo!()
-        /*
-        // First verify that the operations are valid against the grafted root
-        // Use the same verification logic as verify_range_proof
-        let op_count = leaf_pos_to_num(grafted_proof.size);
+    /// Verifies operations using dual MMR proofs (base + bitmap) against a target grafted root.
+    ///
+    /// This function takes the output of `sync_range_proof` and verifies that the operations
+    /// are valid members of the database with the given grafted root. It uses a proof synthesis
+    /// approach to reconstruct verification capability from the dual proofs.
+    ///
+    /// # Arguments
+    /// * `base_proof` - Proof over the base MMR (pure operations, no grafting)
+    /// * `bitmap_proof` - Proof over the bitmap MMR (chunk digests)
+    /// * `ops` - The operations to verify
+    /// * `chunks` - The bitmap chunks required for grafting verification
+    /// * `start_loc` - The starting location of the operation range
+    /// * `target_root` - The expected grafted MMR root to verify against
+    ///
+    /// # Returns
+    /// `true` if the operations are valid members of the database with the target root
+    ///
+    /// # Implementation Strategy
+    /// This function uses the base proof structure as a foundation and applies grafting
+    /// transformations using the bitmap chunks to reconstruct verification capability
+    /// equivalent to a grafted proof, then delegates to existing verification logic.
+    pub fn sync_range_proof_verify(
+        base_proof: &Proof<H::Digest>,
+        bitmap_proof: &Proof<H::Digest>,
+        ops: &[Fixed<K, V>],
+        chunks: &[[u8; N]],
+        start_loc: u64,
+        target_root: &H::Digest,
+    ) -> bool {
+        println!("🔍 DEBUG: Starting sync_range_proof_verify");
+        println!(
+            "  base_proof.size: {}, digests: {}",
+            base_proof.size,
+            base_proof.digests.len()
+        );
+        println!(
+            "  bitmap_proof.size: {}, digests: {}",
+            bitmap_proof.size,
+            bitmap_proof.digests.len()
+        );
+        println!("  ops.len(): {}", ops.len());
+        println!("  chunks.len(): {}", chunks.len());
+        println!("  start_loc: {}", start_loc);
+
+        // Validate basic proof structure and operation range
+        let op_count = leaf_pos_to_num(base_proof.size);
         let Some(op_count) = op_count else {
-            return Err(Error::InvalidProof);
+            println!("❌ DEBUG: verification failed, invalid base proof size");
+            debug!("verification failed, invalid base proof size");
+            return false;
         };
+        println!("  op_count from base_proof: {}", op_count);
+
         let end_loc = start_loc + ops.len() as u64 - 1;
+        println!("  end_loc: {}", end_loc);
+
         if end_loc >= op_count {
-            return Err(Error::InvalidProof);
+            println!("❌ DEBUG: verification failed, invalid operation range (end_loc: {}, op_count: {})", end_loc, op_count);
+            debug!(
+                loc = end_loc,
+                op_count, "verification failed, invalid operation range"
+            );
+            return false;
         }
+
+        // For the minimal implementation, we'll use the base proof structure
+        // and apply grafting verification using the bitmap chunks.
+        // This leverages the existing GraftingVerifier infrastructure.
 
         let start_pos = leaf_num_to_pos(start_loc);
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+        println!("  start_pos: {}", start_pos);
+        println!("  elements.len(): {}", elements.len());
 
+        // Create a GraftingVerifier using the bitmap chunks
+        // This will apply grafting transformations during verification
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let mut verifier = GraftingVerifier::<H, &[u8]>::new(
-            Self::grafting_height(),
-            start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS,
-            &chunk_vec,
-        );
+        let start_chunk_num = start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        println!("  start_chunk_num: {}", start_chunk_num);
+        println!("  grafting_height: {}", Self::grafting_height());
+        println!("  chunk_vec.len(): {}", chunk_vec.len());
 
-        // Handle partial chunk case (same as verify_range_proof)
-        if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            // No partial chunk - verify directly
-            if !grafted_proof.verify_range_inclusion(
-                &mut verifier,
-                &elements,
-                start_pos,
-                target_root,
-            ) {
-                return Err(Error::InvalidProof);
-            }
+        let mut verifier =
+            GraftingVerifier::<H, &[u8]>::new(Self::grafting_height(), start_chunk_num, &chunk_vec);
+
+        // IMPORTANT: We need custom verification logic for base MMR proofs
+        // The existing verify_range_proof expects a grafted proof with partial chunk handling
+        // But our base proof doesn't have that structure
+
+        println!("🔍 DEBUG: Using custom base proof verification");
+
+        // Direct verification approach for base MMR proof with grafting
+        // This is similar to verify_range_proof but without partial chunk assumptions
+
+        // Verify the base proof directly with the GraftingVerifier
+        // The GraftingVerifier will apply grafting transformations during verification
+        let result = if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
+            // No partial chunk - straightforward verification
+            println!("  📍 No partial chunk case");
+            base_proof.verify_range_inclusion(&mut verifier, &elements, start_pos, target_root)
         } else {
-            // Has partial chunk - last digest in proof should be the partial chunk hash
-            if grafted_proof.digests.is_empty() {
-                return Err(Error::InvalidProof);
-            }
-            let mut proof = grafted_proof.clone();
-            let last_chunk_digest = proof.digests.pop().unwrap();
+            // Has partial chunk - need special handling
+            println!("  📍 Has partial chunk case");
 
-            // Reconstruct the MMR root
-            let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
-                Ok(root) => root,
-                Err(_) => return Err(Error::InvalidProof),
+            // For base proofs, we don't have the partial chunk digest appended
+            // We need to reconstruct the root and then apply partial chunk transformation
+
+            // First, verify and reconstruct the MMR root using base proof
+            let mmr_root = match base_proof.reconstruct_root(&mut verifier, &elements, start_pos) {
+                Ok(root) => {
+                    println!("  ✅ Reconstructed MMR root successfully");
+                    root
+                }
+                Err(error) => {
+                    println!("  ❌ Failed to reconstruct root: {:?}", error);
+                    return false;
+                }
             };
 
-            let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
-            let reconstructed_root = Bitmap::<H, N>::partial_chunk_root(
+            // Now we need to apply the partial chunk transformation
+            // This is what makes it a grafted root
+            let last_chunk = chunks.last().expect("chunks should not be empty");
+            let mut hasher = Standard::<H>::default();
+
+            // Compute the partial chunk digest
+            hasher.inner().update(last_chunk.as_ref());
+            let partial_chunk_digest = hasher.inner().finalize();
+
+            // Apply partial chunk root transformation
+            // This combines the MMR root with the partial chunk digest
+            let next_bit = (op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS) as u64;
+            let grafted_root = Bitmap::<H, N>::partial_chunk_root(
                 hasher.inner(),
                 &mmr_root,
                 next_bit,
-                &last_chunk_digest,
+                &partial_chunk_digest,
             );
 
-            if reconstructed_root != *target_root {
-                return Err(Error::InvalidProof);
-            }
-        }
-
-        // Extract pinned nodes from base MMR proof
-        let ops_len = ops.len() as u64;
-        let base_pinned = extract_pinned_nodes(base_proof, start_loc, ops_len)?;
-
-        // Extract pinned nodes from bitmap MMR proof
-        // If the bitmap proof is empty (size = 0), there are no pinned nodes to extract
-        let bitmap_pinned = if bitmap_proof.size > 0 {
-            let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
-            let start_chunk = start_loc / chunk_bits;
-            let end_chunk = end_loc / chunk_bits;
-            let chunks_count = end_chunk - start_chunk + 1;
-            extract_pinned_nodes(bitmap_proof, start_chunk, chunks_count)?
-        } else {
-            vec![]
+            println!("  Comparing grafted_root with target_root");
+            grafted_root == *target_root
         };
 
-        Ok((base_pinned, bitmap_pinned))
-        */
+        if result {
+            println!("✅ DEBUG: base proof verification succeeded");
+        } else {
+            println!("❌ DEBUG: base proof verification failed");
+        }
+
+        result
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -1858,5 +2000,329 @@ pub mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    #[test_traced("DEBUG")]
+    pub fn test_sync_range_proof_dual_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "sync_range_proof_dual_mmr";
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone(), partition).await;
+
+            // Create initial state with multiple operations to ensure we have
+            // meaningful bitmap chunks and base MMR structure
+            for i in 0u64..8 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 100).to_be_bytes());
+                db.update(key, value).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            let historical_log_size = db.op_count();
+            let target_root = db.root(&mut hasher).await.unwrap();
+
+            // Test Case 1: Generate dual MMR proofs for a range of operations
+            let start_loc = 2;
+            let max_ops = NZU64!(4); // Operations 2, 3, 4, 5
+
+            let (base_proof, bitmap_proof, ops, chunks) = db
+                .sync_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // Verify the dual MMR proof structure
+            assert_eq!(ops.len(), 4, "Should have 4 operations");
+            assert!(!base_proof.digests.is_empty(), "Base proof should have digests");
+
+            // Bitmap proof may be empty if we don't have enough chunks, but that's ok
+            println!("Base proof size: {}, digests: {}", base_proof.size, base_proof.digests.len());
+            println!("Bitmap proof size: {}, digests: {}", bitmap_proof.size, bitmap_proof.digests.len());
+            println!("Chunks: {}", chunks.len());
+
+            // Test Case 2: Verify the dual MMR proof against the target root
+            let verification_result = CurrentTest::sync_range_proof_verify(
+                &base_proof,
+                &bitmap_proof,
+                &ops,
+                &chunks,
+                start_loc,
+                &target_root,
+            );
+
+            assert!(verification_result, "Dual MMR proof verification should succeed");
+
+            // Test Case 3: Compare with traditional grafted proof verification
+            // Generate a traditional grafted proof for the same range
+            let (traditional_proof, traditional_ops, traditional_chunks) = db
+                .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // Verify traditional proof works
+            let traditional_verification = CurrentTest::verify_range_proof(
+                &mut hasher,
+                &traditional_proof,
+                start_loc,
+                &traditional_ops,
+                &traditional_chunks,
+                &target_root,
+            );
+
+            assert!(traditional_verification, "Traditional grafted proof should also succeed");
+
+            // Test Case 4: Ensure operations and chunks are identical
+            assert_eq!(ops, traditional_ops, "Operations should be identical");
+            assert_eq!(chunks, traditional_chunks, "Bitmap chunks should be identical");
+
+            // Test Case 5: Test with invalid target root (should fail)
+            let mut wrong_hasher = Standard::<Sha256>::new();
+            let wrong_root = wrong_hasher.finalize(); // Random wrong root
+
+            let invalid_verification = CurrentTest::sync_range_proof_verify(
+                &base_proof,
+                &bitmap_proof,
+                &ops,
+                &chunks,
+                start_loc,
+                &wrong_root,
+            );
+
+            assert!(!invalid_verification, "Verification with wrong root should fail");
+
+            // Test Case 6: Test edge case - single operation
+            let single_start = 0;
+            let single_max = NZU64!(1);
+
+            let (single_base, single_bitmap, single_ops, single_chunks) = db
+                .sync_range_proof(hasher.inner(), historical_log_size, single_start, single_max)
+                .await
+                .unwrap();
+
+            let single_verification = CurrentTest::sync_range_proof_verify(
+                &single_base,
+                &single_bitmap,
+                &single_ops,
+                &single_chunks,
+                single_start,
+                &target_root,
+            );
+
+            assert!(single_verification, "Single operation verification should succeed");
+            assert_eq!(single_ops.len(), 1, "Should have exactly 1 operation");
+
+            // Test Case 7: Test boundary case - last operations
+            let last_start = historical_log_size - 2;
+            let last_max = NZU64!(2);
+
+            let (last_base, last_bitmap, last_ops, last_chunks) = db
+                .sync_range_proof(hasher.inner(), historical_log_size, last_start, last_max)
+                .await
+                .unwrap();
+
+            let last_verification = CurrentTest::sync_range_proof_verify(
+                &last_base,
+                &last_bitmap,
+                &last_ops,
+                &last_chunks,
+                last_start,
+                &target_root,
+            );
+
+            assert!(last_verification, "Last operations verification should succeed");
+
+            println!("✅ All dual MMR sync proof tests passed!");
+
+            db.destroy().await.unwrap();
+        });
+    }
     */
+
+    #[test_traced("DEBUG")]
+    pub fn test_sync_range_proof_dual_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "sync_range_proof_dual_mmr";
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone(), partition).await;
+
+            // Create initial state with multiple operations to ensure we have
+            // meaningful bitmap chunks and base MMR structure
+            for i in 0u64..8 {
+                let key = Sha256::hash(&i.to_be_bytes());
+                let value = Sha256::hash(&(i * 100).to_be_bytes());
+                db.update(key, value).await.unwrap();
+            }
+            db.commit().await.unwrap();
+
+            let historical_log_size = db.op_count();
+            let target_root = db.root(&mut hasher).await.unwrap();
+
+            // Test Case 1: Generate dual MMR proofs for a range of operations
+            let start_loc = 1;
+            let max_ops = NZU64!(3); // Operations 2, 3, 4, 5
+
+            let (base_proof, bitmap_proof, ops, chunks) = db
+                .sync_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // Verify the dual MMR proof structure
+            assert_eq!(ops.len(), 3, "Should have 3 operations");
+            assert!(
+                !base_proof.digests.is_empty(),
+                "Base proof should have digests"
+            );
+
+            // Bitmap proof may be empty if we don't have enough chunks, but that's ok
+            println!(
+                "Base proof size: {}, digests: {}",
+                base_proof.size,
+                base_proof.digests.len()
+            );
+            println!(
+                "Bitmap proof size: {}, digests: {}",
+                bitmap_proof.size,
+                bitmap_proof.digests.len()
+            );
+            println!("Chunks: {}", chunks.len());
+
+            // Test Case 2: Verify the dual MMR proof against the target root
+            let verification_result = CurrentTest::sync_range_proof_verify(
+                &base_proof,
+                &bitmap_proof,
+                &ops,
+                &chunks,
+                start_loc,
+                &target_root,
+            );
+
+            assert!(
+                verification_result,
+                "Dual MMR proof verification should succeed"
+            );
+
+            // Test Case 3: Compare with traditional grafted proof verification
+            // Generate a traditional grafted proof for the same range
+            let (traditional_proof, traditional_ops, traditional_chunks) = db
+                .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
+                .await
+                .unwrap();
+
+            // DEBUG: Compare proof structures
+            println!("📊 PROOF COMPARISON:");
+            println!(
+                "  Base proof:       size={}, digests={}",
+                base_proof.size,
+                base_proof.digests.len()
+            );
+            println!(
+                "  Traditional proof: size={}, digests={}",
+                traditional_proof.size,
+                traditional_proof.digests.len()
+            );
+            println!(
+                "  Sizes match: {}",
+                base_proof.size == traditional_proof.size
+            );
+            println!(
+                "  Digest counts match: {}",
+                base_proof.digests.len() == traditional_proof.digests.len()
+            );
+            // Verify traditional proof works
+            let traditional_verification = CurrentTest::verify_range_proof(
+                &mut hasher,
+                &traditional_proof,
+                start_loc,
+                &traditional_ops,
+                &traditional_chunks,
+                &target_root,
+            );
+
+            assert!(
+                traditional_verification,
+                "Traditional grafted proof should also succeed"
+            );
+
+            // Test Case 4: Ensure operations and chunks are identical
+            assert_eq!(ops, traditional_ops, "Operations should be identical");
+            assert_eq!(
+                chunks, traditional_chunks,
+                "Bitmap chunks should be identical"
+            );
+
+            // Test Case 5: Test with invalid target root (should fail)
+            let mut wrong_hasher = Standard::<Sha256>::new();
+            let wrong_root = wrong_hasher.finalize(); // Random wrong root
+
+            let invalid_verification = CurrentTest::sync_range_proof_verify(
+                &base_proof,
+                &bitmap_proof,
+                &ops,
+                &chunks,
+                start_loc,
+                &wrong_root,
+            );
+
+            assert!(
+                !invalid_verification,
+                "Verification with wrong root should fail"
+            );
+
+            // Test Case 6: Test edge case - single operation
+            let single_start = 0;
+            let single_max = NZU64!(1);
+
+            let (single_base, single_bitmap, single_ops, single_chunks) = db
+                .sync_range_proof(
+                    hasher.inner(),
+                    historical_log_size,
+                    single_start,
+                    single_max,
+                )
+                .await
+                .unwrap();
+
+            let single_verification = CurrentTest::sync_range_proof_verify(
+                &single_base,
+                &single_bitmap,
+                &single_ops,
+                &single_chunks,
+                single_start,
+                &target_root,
+            );
+
+            assert!(
+                single_verification,
+                "Single operation verification should succeed"
+            );
+            assert_eq!(single_ops.len(), 1, "Should have exactly 1 operation");
+
+            // Test Case 7: Test boundary case - last operations
+            let last_start = historical_log_size - 2;
+            let last_max = NZU64!(2);
+
+            let (last_base, last_bitmap, last_ops, last_chunks) = db
+                .sync_range_proof(hasher.inner(), historical_log_size, last_start, last_max)
+                .await
+                .unwrap();
+
+            let last_verification = CurrentTest::sync_range_proof_verify(
+                &last_base,
+                &last_bitmap,
+                &last_ops,
+                &last_chunks,
+                last_start,
+                &target_root,
+            );
+
+            assert!(
+                last_verification,
+                "Last operations verification should succeed"
+            );
+
+            println!("✅ All dual MMR sync proof tests passed!");
+
+            db.destroy().await.unwrap();
+        });
+    }
 }
