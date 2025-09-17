@@ -916,17 +916,11 @@ impl<
             return false;
         }
 
-        // For the minimal implementation, we'll use the base proof structure
-        // and apply grafting verification using the bitmap chunks.
-        // This leverages the existing GraftingVerifier infrastructure.
-
         let start_pos = leaf_num_to_pos(start_loc);
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
         println!("  start_pos: {}", start_pos);
         println!("  elements.len(): {}", elements.len());
 
-        // Create a GraftingVerifier using the bitmap chunks
-        // This will apply grafting transformations during verification
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let start_chunk_num = start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
         println!("  start_chunk_num: {}", start_chunk_num);
@@ -936,29 +930,14 @@ impl<
         let mut verifier =
             GraftingVerifier::<H, &[u8]>::new(Self::grafting_height(), start_chunk_num, &chunk_vec);
 
-        // IMPORTANT: We need custom verification logic for base MMR proofs
-        // The existing verify_range_proof expects a grafted proof with partial chunk handling
-        // But our base proof doesn't have that structure
-
         println!("🔍 DEBUG: Using custom base proof verification");
 
-        // Direct verification approach for base MMR proof with grafting
-        // This is similar to verify_range_proof but without partial chunk assumptions
-
-        // Verify the base proof directly with the GraftingVerifier
-        // The GraftingVerifier will apply grafting transformations during verification
         let result = if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            // No partial chunk - straightforward verification
             println!("  📍 No partial chunk case");
             base_proof.verify_range_inclusion(&mut verifier, &elements, start_pos, target_root)
         } else {
-            // Has partial chunk - need special handling
             println!("  📍 Has partial chunk case");
 
-            // For base proofs, we don't have the partial chunk digest appended
-            // We need to reconstruct the root and then apply partial chunk transformation
-
-            // First, verify and reconstruct the MMR root using base proof
             let mmr_root = match base_proof.reconstruct_root(&mut verifier, &elements, start_pos) {
                 Ok(root) => {
                     println!("  ✅ Reconstructed MMR root successfully");
@@ -970,17 +949,12 @@ impl<
                 }
             };
 
-            // Now we need to apply the partial chunk transformation
-            // This is what makes it a grafted root
             let last_chunk = chunks.last().expect("chunks should not be empty");
             let mut hasher = Standard::<H>::default();
 
-            // Compute the partial chunk digest
             hasher.inner().update(last_chunk.as_ref());
             let partial_chunk_digest = hasher.inner().finalize();
 
-            // Apply partial chunk root transformation
-            // This combines the MMR root with the partial chunk digest
             let next_bit = (op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS) as u64;
             let grafted_root = Bitmap::<H, N>::partial_chunk_root(
                 hasher.inner(),
