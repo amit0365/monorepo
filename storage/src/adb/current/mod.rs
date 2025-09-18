@@ -819,7 +819,7 @@ impl<
             }
         };
 
-        // Read the operations from the log (same as historical_range_proof)
+        // Read the operations from the log
         let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
         let futures = (start_loc..=end_loc)
             .map(|i| self.any.log.read(i))
@@ -829,7 +829,7 @@ impl<
             .into_iter()
             .for_each(|op| ops.push(op));
 
-        // Gather the bitmap chunks (same as historical_range_proof)
+        // Gather the bitmap chunks
         let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
         for i in start_chunk..=end_chunk {
             let bit_offset = i * chunk_bits;
@@ -837,7 +837,7 @@ impl<
             chunks.push(chunk);
         }
 
-        // Handle partial chunks in the historical state (same as historical_range_proof)
+        // Handle partial chunks in the historical state
         let last_chunk = historical_bitmap.last_chunk();
         if last_chunk.1 != 0 {
             // For dual proofs, we need to handle partial chunks differently
@@ -1064,6 +1064,7 @@ pub mod test {
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use test_case::test_case;
     use tracing::warn;
 
     const PAGE_SIZE: usize = 88;
@@ -1646,8 +1647,10 @@ pub mod test {
         });
     }
 
-    #[test_traced("DEBUG")]
-    pub fn test_sync_range_proof_dual_mmr() {
+    #[test_case(126)]
+    #[test_case(127)]
+    #[test_case(128)]
+    pub fn test_sync_range_proof_dual_mmr(size: u64) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "sync_range_proof_dual_mmr";
@@ -1656,7 +1659,7 @@ pub mod test {
 
             // Create initial state with multiple operations to ensure we have
             // meaningful bitmap chunks and base MMR structure
-            for i in 0u64..8 {
+            for i in 0u64..size {
                 let key = Sha256::hash(&i.to_be_bytes());
                 let value = Sha256::hash(&(i * 100).to_be_bytes());
                 db.update(key, value).await.unwrap();
@@ -1668,7 +1671,7 @@ pub mod test {
 
             // Test Case 1: Generate dual MMR proofs for a range of operations
             let start_loc = 1;
-            let max_ops = NZU64!(3); // Operations 2, 3, 4, 5
+            let max_ops = NZU64!(3);
 
             let (base_proof, bitmap_proof, ops, chunks) = db
                 .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
@@ -1708,60 +1711,6 @@ pub mod test {
             assert!(
                 verification_result,
                 "Dual MMR proof verification should succeed"
-            );
-
-            // Test Case 3: Compare with traditional grafted proof verification
-            // Generate a traditional grafted proof for the same range
-            let (
-                traditional_base_proof,
-                _traditional_bitmap_proof,
-                traditional_ops,
-                traditional_chunks,
-            ) = db
-                .historical_range_proof(hasher.inner(), historical_log_size, start_loc, max_ops)
-                .await
-                .unwrap();
-
-            // DEBUG: Compare proof structures
-            println!("📊 PROOF COMPARISON:");
-            println!(
-                "  Base proof:       size={}, digests={}",
-                base_proof.size,
-                base_proof.digests.len()
-            );
-            println!(
-                "  Traditional proof: size={}, digests={}",
-                traditional_base_proof.size,
-                traditional_base_proof.digests.len()
-            );
-            println!(
-                "  Sizes match: {}",
-                base_proof.size == traditional_base_proof.size
-            );
-            println!(
-                "  Digest counts match: {}",
-                base_proof.digests.len() == traditional_base_proof.digests.len()
-            );
-            // Verify traditional proof works (now using the same dual MMR verification)
-            let traditional_verification = CurrentTest::historical_range_proof_verify(
-                &traditional_base_proof,
-                &_traditional_bitmap_proof,
-                &traditional_ops,
-                &traditional_chunks,
-                start_loc,
-                &target_root,
-            );
-
-            assert!(
-                traditional_verification,
-                "Traditional grafted proof should also succeed"
-            );
-
-            // Test Case 4: Ensure operations and chunks are identical
-            assert_eq!(ops, traditional_ops, "Operations should be identical");
-            assert_eq!(
-                chunks, traditional_chunks,
-                "Bitmap chunks should be identical"
             );
 
             // Test Case 5: Test with invalid target root (should fail)
