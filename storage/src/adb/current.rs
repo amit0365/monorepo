@@ -16,8 +16,8 @@ use crate::{
             Hasher as GraftingHasher, Storage as GraftingStorage, Verifier as GraftingVerifier,
         },
         hasher::Hasher,
-        iterator::{leaf_num_to_pos, leaf_pos_to_num},
-        verification, Proof, StandardHasher as Standard,
+        iterator::{leaf_num_to_pos, leaf_pos_to_num, pos_to_height},
+        proof, verification, Proof, StandardHasher as Standard,
     },
     store::operation::Fixed,
     translator::Translator,
@@ -27,7 +27,10 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use futures::{future::try_join_all, try_join};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::debug;
 
 /// Configuration for a [Current] authenticated db.
@@ -404,6 +407,115 @@ impl<
     /// # Panics
     ///
     /// Panics if there are uncommitted operations or if `start_loc` is invalid.
+    pub async fn sync_range_proof(
+        &self,
+        hasher: &mut H,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    ) -> Result<
+        (
+            Proof<H::Digest>,
+            Proof<H::Digest>,
+            Vec<Fixed<K, V>>,
+            Vec<[u8; N]>,
+        ),
+        Error,
+    > {
+        assert!(
+            !self.status.is_dirty(),
+            "must process updates before computing proofs"
+        );
+
+        let mmr = &self.any.mmr;
+        let start_pos = leaf_num_to_pos(start_loc);
+        let leaves = mmr.leaves();
+        assert!(start_loc < leaves, "start_loc is invalid");
+
+        let max_loc = start_loc + max_ops.get();
+        let end_loc = if max_loc > leaves {
+            leaves - 1
+        } else {
+            max_loc - 1
+        };
+        let end_pos = leaf_num_to_pos(end_loc);
+
+        let mut base_proof = verification::range_proof(mmr, start_pos, end_pos).await?;
+
+        let mut ops = Vec::with_capacity((end_loc - start_loc + 1) as usize);
+        let futures = (start_loc..=end_loc)
+            .map(|loc| self.any.log.read(loc))
+            .collect::<Vec<_>>();
+        try_join_all(futures)
+            .await?
+            .into_iter()
+            .for_each(|op| ops.push(op));
+
+        let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let start_chunk = start_loc / chunk_bits;
+        let end_chunk = end_loc / chunk_bits;
+
+        let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
+        println!(
+            "filling chunks: start_chunk: {}, end_chunk: {}",
+            start_chunk, end_chunk
+        );
+        for chunk_index in start_chunk..=end_chunk {
+            let bit_offset = chunk_index * chunk_bits;
+            chunks.push(*self.status.get_chunk(bit_offset));
+        }
+
+        let bitmap_leaves = self.status.mmr.leaves();
+        let bitmap_proof = if bitmap_leaves == 0 {
+            // Proof::default()
+            todo!()
+        } else {
+            let last_leaf = bitmap_leaves - 1;
+            // let bitmap_start_chunk = start_chunk.min(last_leaf);
+            // let bitmap_end_chunk = end_chunk.min(last_leaf);
+            let bitmap_start_pos = leaf_num_to_pos(start_chunk); // Position (not leaf number) of first chunk in status
+            let bitmap_end_pos = leaf_num_to_pos(end_chunk).min(self.status.mmr.size() - 1); // Position (not leaf number) of last chunk in status
+            println!(
+                "GENERATION: bitmap_leaves={}, last_leaf={}, start_chunk={}, end_chunk={}, bitmap_start_pos={}, bitmap_end_pos={}, bitmap_mmr_size={}",
+                bitmap_leaves, last_leaf, start_chunk, end_chunk,  bitmap_start_pos, bitmap_end_pos, self.status.mmr.size()
+            );
+            if bitmap_start_pos == self.status.mmr.size() {
+                let mut hasher = Standard::<H>::new();
+                let mut hasher = GraftingHasher::new(&mut hasher, Self::grafting_height());
+                println!("loading grafted digests");
+                hasher
+                    .load_grafted_digests(
+                        &(bitmap_start_pos..=bitmap_end_pos)
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                        &self.any.mmr,
+                    )
+                    .await?;
+                println!("loaded grafted digests");
+                Proof {
+                    size: self.status.bit_count(),
+                    digests: vec![self.status.mmr.root(&mut hasher)],
+                }
+            } else {
+                let mut proof =
+                    verification::range_proof(&self.status, bitmap_start_pos, bitmap_end_pos)
+                        .await?;
+                proof.size = self.status.bit_count();
+                proof
+            }
+        };
+
+        let last_chunk = self.status.last_chunk();
+        if last_chunk.1 != 0 {
+            hasher.update(last_chunk.0);
+            let last_chunk_digest = hasher.finalize();
+            println!("last chunk digest: {:?}", last_chunk_digest);
+            base_proof.digests.push(last_chunk_digest);
+        }
+
+        Ok((base_proof, bitmap_proof, ops, chunks))
+    }
+
+    /// Panics if there are uncommitted operations or if `start_loc` is invalid.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
@@ -530,6 +642,172 @@ impl<
         );
 
         reconstructed_root == *root
+    }
+
+    /// Verify a sync range proof consisting of base and bitmap MMR proofs.
+    pub fn verify_sync_range_proof(
+        hasher: &mut Standard<H>,
+        base_proof: &Proof<H::Digest>,
+        bitmap_proof: &Proof<H::Digest>,
+        start_loc: u64,
+        ops: &[Fixed<K, V>],
+        chunks: &[[u8; N]],
+        root: &H::Digest,
+    ) -> bool {
+        if ops.is_empty() {
+            debug!("verification failed, no operations provided");
+            return false;
+        }
+
+        let Some(op_count) = leaf_pos_to_num(base_proof.size) else {
+            debug!("verification failed, invalid base proof size");
+            return false;
+        };
+
+        let start_pos = leaf_num_to_pos(start_loc);
+        let end_loc = start_loc + ops.len() as u64 - 1;
+        if end_loc >= op_count {
+            debug!(end_loc, op_count, "verification failed, invalid range");
+            return false;
+        }
+
+        let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let start_chunk = start_loc / chunk_bits;
+        let end_chunk = end_loc / chunk_bits;
+        let expected_chunks = (end_chunk - start_chunk + 1) as usize;
+        if chunks.len() != expected_chunks {
+            debug!(
+                provided = chunks.len(),
+                expected = expected_chunks,
+                "verification failed, incorrect chunk count"
+            );
+            return false;
+        }
+
+        // Extract grafted digests from bitmap proof leaves
+        let bitmap_leaf_count = bitmap_proof.size / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        println!(
+            "sync range proof verification: start_loc={}, end_loc={}, start_chunk={}, end_chunk={}, bitmap_leaf_count={}, bitmap_proof_size={}, op_count={}",
+            start_loc, end_loc, start_chunk, end_chunk, bitmap_leaf_count, bitmap_proof.size, op_count
+        );
+
+        // Check if we're trying to prove a partial chunk
+        let chunk_bits = Bitmap::<H, N>::CHUNK_SIZE_BITS;
+        let total_chunks_needed = (op_count + chunk_bits - 1) / chunk_bits;
+        println!(
+            "total chunks needed for {} ops: {}, bitmap has {} full chunks",
+            op_count, total_chunks_needed, bitmap_leaf_count
+        );
+
+        let bitmap_start_pos = leaf_num_to_pos(start_chunk);
+        let grafted_digests = if bitmap_leaf_count == 0
+            || start_chunk == (bitmap_proof.size / Bitmap::<H, N>::CHUNK_SIZE_BITS)
+        {
+            // No full bitmap chunks exist yet; no grafted digests available
+            BTreeMap::new()
+        } else {
+            let bitmap_end_pos = leaf_num_to_pos(
+                end_chunk.min((bitmap_proof.size / Bitmap::<H, N>::CHUNK_SIZE_BITS) - 1),
+            );
+            println!(
+                "VERIFICATION: start_chunk={}, end_chunk={}, bitmap_start_pos={}, bitmap_end_pos={}",
+                start_chunk, end_chunk, bitmap_start_pos, bitmap_end_pos
+            );
+
+            // Get the positions that the bitmap proof covers
+            let size = bitmap_proof.size / Bitmap::<H, N>::CHUNK_SIZE_BITS;
+            println!("bitmap proof size: {}", size);
+            let bitmap_positions =
+                proof::nodes_required_for_range_proof(size, bitmap_start_pos, bitmap_end_pos);
+            println!(
+                "bitmap MMR size: {}, positions: {:?}",
+                size, bitmap_positions
+            );
+
+            // Extract only the leaf digests (height 0) which are the grafted digests we need
+            let mut grafted_digests = BTreeMap::new();
+            for (i, pos) in bitmap_positions.iter().enumerate() {
+                let height = pos_to_height(*pos);
+                println!("bitmap proof position: pos={}, height={}", pos, height);
+                if height == 0 {
+                    // This is a leaf node containing a grafted digest
+                    let Some(chunk_idx) = leaf_pos_to_num(*pos) else {
+                        println!("invalid leaf position in bitmap proof");
+                        return false;
+                    };
+                    println!("extracted grafted digest for chunk {}", chunk_idx);
+                    grafted_digests.insert(chunk_idx, bitmap_proof.digests[i]);
+                }
+                // Skip internal nodes (height > 0) as they're just structural
+            }
+            println!("extracted {} grafted digests", grafted_digests.len());
+            grafted_digests
+        };
+
+        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
+        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
+        // chunk_vec only has incomplete chunk1
+
+        let verifier = GraftingVerifier::<H>::new(Self::grafting_height(), start_chunk, chunk_vec);
+        let mut verifier = verifier.with_precomputed(&grafted_digests);
+
+        // Handle partial chunk case
+        let mut base_proof = base_proof.clone();
+        let partial_chunk_digest = if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS != 0 {
+            if base_proof.digests.is_empty() {
+                println!("verification failed, missing partial chunk digest");
+                return false;
+            }
+            println!("extracting partial chunk digest");
+            Some(base_proof.digests.pop().unwrap())
+        } else {
+            println!("no partial chunk digest");
+            None
+        };
+        println!("partial chunk digest: {:?}", partial_chunk_digest);
+
+        // Verify base proof with grafting verifier
+        let base_root = match base_proof.reconstruct_root(&mut verifier, &elements, start_pos) {
+            Ok(root) => root,
+            Err(error) => {
+                println!("reconstruction error {:?}", error);
+                return false;
+            }
+        };
+        println!("base root: {:?}", base_root);
+
+        println!("reconstructing root");
+        // Apply partial chunk if needed
+        let reconstructed_root = if let Some(partial_digest) = partial_chunk_digest {
+            println!("partial chunk digest: {:?}", partial_digest);
+            let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
+            Bitmap::<H, N>::partial_chunk_root(
+                hasher.inner(),
+                &base_root,
+                next_bit,
+                &partial_digest,
+            )
+        } else {
+            base_root
+        };
+        println!(
+            "reconstructed root: {:?} == {:?}: {}",
+            reconstructed_root,
+            root,
+            reconstructed_root == *root
+        );
+
+        // Final verification
+        if reconstructed_root != *root {
+            debug!(
+                expected = ?root,
+                reconstructed = ?reconstructed_root,
+                "verification failed, root mismatch"
+            );
+            return false;
+        }
+
+        true
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
@@ -1004,6 +1282,64 @@ pub mod test {
                     CurrentTest::verify_range_proof(&mut hasher, &proof, i, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    pub fn test_sync_range_proof() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let partition = "sync_range_proof";
+            let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone(), partition).await;
+            apply_random_ops(19, true, context.next_u64(), &mut db)
+                .await
+                .unwrap();
+
+            let root = db.root(&mut hasher).await.unwrap();
+            let max_ops = 4;
+            let start_loc = db.any.inactivity_floor_loc();
+            let end_loc = db.op_count();
+
+            for i in start_loc..end_loc {
+                println!("start_loc: {i}, end_loc: {end_loc}");
+                let (base_proof, bitmap_proof, ops, chunks) = db
+                    .sync_range_proof(hasher.inner(), i, NZU64!(max_ops))
+                    .await
+                    .unwrap();
+                println!("bitmap_proof: {:?}", bitmap_proof);
+
+                assert!(
+                    CurrentTest::verify_sync_range_proof(
+                        &mut hasher,
+                        &base_proof,
+                        &bitmap_proof,
+                        i,
+                        &ops,
+                        &chunks,
+                        &root,
+                    ),
+                    "failed to verify sync range proof at {i}"
+                );
+
+                let (grafted_proof, expected_ops, expected_chunks) = db
+                    .range_proof(hasher.inner(), i, NZU64!(max_ops))
+                    .await
+                    .unwrap();
+
+                assert_eq!(ops, expected_ops);
+                assert_eq!(chunks, expected_chunks);
+                assert!(CurrentTest::verify_range_proof(
+                    &mut hasher,
+                    &grafted_proof,
+                    i,
+                    &expected_ops,
+                    &expected_chunks,
+                    &root,
+                ));
             }
 
             db.destroy().await.unwrap();

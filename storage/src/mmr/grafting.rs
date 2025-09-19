@@ -66,7 +66,7 @@ use crate::mmr::{
 };
 use commonware_cryptography::Hasher as CHasher;
 use futures::future::try_join_all;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::debug;
 
 pub struct Hasher<'a, H: CHasher> {
@@ -103,10 +103,16 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         leaves: &[u64],
         mmr: &impl StorageTrait<H::Digest>,
     ) -> Result<(), Error> {
+        println!("loading grafted digests: {:?}", leaves);
         let mut futures = Vec::with_capacity(leaves.len());
         for leaf_num in leaves {
             let dest_pos = self.destination_pos(leaf_num_to_pos(*leaf_num));
+            println!(
+                "loading grafted digest for pos {:?}: {:?}",
+                leaf_num, dest_pos
+            );
             let future = mmr.get_node(dest_pos);
+            println!("got future for pos {:?}", dest_pos);
             futures.push(future);
         }
         let join = try_join_all(futures).await?;
@@ -142,7 +148,7 @@ pub struct HasherFork<'a, H: CHasher> {
 /// This algorithm performs walks down corresponding branches of the peak and base trees. When we
 /// find the node in the peak tree we are looking for, we return the position of the corresponding
 /// node reached in the base tree.
-fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
+pub(crate) fn destination_pos(peak_node_pos: u64, height: u32) -> u64 {
     let leading_zeros = (peak_node_pos + 1).leading_zeros();
     assert!(leading_zeros >= height, "destination_pos > u64::MAX");
     let mut peak_pos = u64::MAX >> leading_zeros;
@@ -322,6 +328,9 @@ pub struct Verifier<'a, H: CHasher> {
 
     /// The leaf number of the first element we are verifying
     num: u64,
+
+    /// Optional precomputed grafted digests keyed by the global chunk index.
+    precomputed: Option<&'a BTreeMap<u64, H::Digest>>,
 }
 
 impl<'a, H: CHasher> Verifier<'a, H> {
@@ -331,17 +340,28 @@ impl<'a, H: CHasher> Verifier<'a, H> {
             height,
             elements,
             num,
+            precomputed: None,
         }
     }
 
     pub fn standard(&mut self) -> &mut StandardHasher<H> {
         &mut self.hasher
     }
+
+    pub fn with_precomputed(mut self, digests: &'a BTreeMap<u64, H::Digest>) -> Self {
+        self.precomputed = Some(digests);
+        self
+    }
 }
 
 impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
     fn leaf_digest(&mut self, pos: u64, element: &[u8]) -> H::Digest {
-        self.hasher.leaf_digest(pos, element)
+        let return_val = self.hasher.leaf_digest(pos, element);
+        println!(
+            "verifier: leaf_digest({pos}, {:?}): {:?}",
+            element, return_val
+        );
+        return_val
     }
 
     fn fork(&self) -> impl HasherTrait<H> {
@@ -350,6 +370,7 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
             height: self.height,
             elements: self.elements.clone(),
             num: self.num,
+            precomputed: self.precomputed,
         }
     }
 
@@ -362,6 +383,10 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
         let digest = self.hasher.node_digest(pos, left_digest, right_digest);
         if pos_to_height(pos) != self.height {
             // If we're not at the grafting boundary we use the digest as-is.
+            println!(
+                "verifier: node_digest({pos}, {:?}, {:?}): {:?}",
+                left_digest, right_digest, digest
+            );
             return digest;
         }
 
@@ -371,34 +396,85 @@ impl<H: CHasher> HasherTrait<H> for Verifier<'_, H> {
         let Some(source_pos) = source_pos else {
             // malformed proof input
             debug!(pos, "no grafting source pos");
+            println!(
+                "verifier (error?): node_digest({pos}, {:?}, {:?}): {:?}",
+                left_digest, right_digest, digest
+            );
             return digest;
         };
         let index = leaf_pos_to_num(source_pos);
         let Some(mut index) = index else {
             // malformed proof input
             debug!(pos = source_pos, "grafting source pos is not a leaf");
+            println!(
+                "verifier (error?): node_digest({pos}, {:?}, {:?}): {:?}",
+                left_digest, right_digest, digest
+            );
             return digest;
         };
+        let get_precomputed = |this: &Self, chunk_idx: u64| {
+            this.precomputed
+                .and_then(|map| map.get(&chunk_idx))
+                .copied()
+        };
+
+        #[cfg(feature = "std")]
+        debug!(
+            chunk_idx = index,
+            first_local = self.num,
+            local_len = self.elements.len(),
+            "grafting verifier node"
+        );
+
         if index < self.num {
-            // malformed proof input
+            if let Some(grafted) = get_precomputed(self, index) {
+                #[cfg(feature = "std")]
+                debug!(chunk_idx = index, "using precomputed grafted digest (left)");
+                println!(
+                    "verifier using precomputed digest: node_digest({pos}, {:?}, {:?}): {:?}",
+                    left_digest, right_digest, grafted
+                );
+                return grafted;
+            }
+            println!("HERE!");
             debug!(index, num = self.num, "grafting index is negative");
             return digest;
-        };
+        }
+
+        let chunk_idx = index;
         index -= self.num;
         if index >= self.elements.len() as u64 {
-            // malformed proof input
+            if let Some(grafted) = get_precomputed(self, chunk_idx) {
+                #[cfg(feature = "std")]
+                debug!(chunk_idx, "using precomputed grafted digest (right)");
+                println!(
+                    "verifier using precomputed diges (right): node_digest({pos}, {:?}, {:?}): {:?}",
+                    left_digest, right_digest, grafted
+                );
+                return grafted;
+            }
             debug!(
-                index,
+                chunk_idx,
                 len = self.elements.len(),
                 "grafting index is out of bounds"
             );
+            println!(
+                "verifier OOB: node_digest({pos}, {:?}, {:?}): {:?}",
+                left_digest, right_digest, digest
+            );
             return digest;
         }
+
         self.hasher
             .update_with_element(self.elements[index as usize]);
         self.hasher.update_with_digest(&digest);
 
-        self.hasher.finalize()
+        let return_val = self.hasher.finalize();
+        println!(
+            "verifier computed digest: node_digest({pos}, {:?}, {:?}): {:?}",
+            left_digest, right_digest, return_val
+        );
+        return_val
     }
 
     fn root<'a>(

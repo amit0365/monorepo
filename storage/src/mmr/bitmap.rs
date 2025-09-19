@@ -65,7 +65,7 @@ pub struct Bitmap<H: CHasher, const N: usize> {
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<H>,
+    pub(crate) mmr: Mmr<H>, // TODO can we make this private?
 
     /// The number of bitmap chunks that have been pruned.
     pruned_chunks: usize,
