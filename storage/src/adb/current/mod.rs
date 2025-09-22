@@ -477,30 +477,7 @@ impl<
         Ok((proof, ops, chunks))
     }
 
-    /// Returns a historical proof that the specified range of operations were part of the database
-    /// at a specific point in time (identified by historical_log_size), along with the operations
-    /// from the range. Also returns the bitmap chunks required to verify the proof.
-    ///
-    /// # Arguments
-    /// * `hasher` - The hasher to use for proof generation
-    /// * `historical_log_size` - The log size at the historical point in time
-    /// * `start_loc` - The starting location of the range
-    /// * `max_ops` - The maximum number of operations to include
-    ///
-    /// # Returns
-    /// A tuple containing:
-    /// * The inclusion proof
-    /// * The operations in the range
-    /// * The bitmap chunks required for verification
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// * The historical state is not available in the cache
-    /// * The range is invalid for the historical state
-    /// * There are uncommitted operations
-
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
+    /// TODO comment
     pub fn verify_range_proof(
         hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
@@ -509,26 +486,15 @@ impl<
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        println!("🔍 INSIDE verify_range_proof:");
-        println!("  proof.size: {}", proof.size);
-        println!("  proof.digests.len(): {}", proof.digests.len());
-
         let op_count = leaf_pos_to_num(proof.size);
         let Some(op_count) = op_count else {
-            println!("  ❌ Failed: invalid proof size");
             debug!("verification failed, invalid proof size");
             return false;
         };
-        println!("  op_count: {}", op_count);
 
         let end_loc = start_loc + ops.len() as u64 - 1;
-        println!("  start_loc: {}, end_loc: {}", start_loc, end_loc);
 
         if end_loc >= op_count {
-            println!(
-                "  ❌ Failed: invalid range (end_loc {} >= op_count {})",
-                end_loc, op_count
-            );
             debug!(
                 loc = end_loc,
                 op_count, "proof verification failed, invalid range"
@@ -537,18 +503,10 @@ impl<
         }
 
         let start_pos = leaf_num_to_pos(start_loc);
-        println!("  start_pos: {}", start_pos);
 
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-        println!("  elements.len(): {}", elements.len());
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        println!("  chunk_vec.len(): {}", chunk_vec.len());
-        println!("  grafting_height: {}", Self::grafting_height());
-        println!(
-            "  start_chunk_num: {}",
-            start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS
-        );
 
         let mut verifier = GraftingVerifier::<H, &[u8]>::new(
             Self::grafting_height(),
@@ -556,28 +514,17 @@ impl<
             &chunk_vec,
         );
 
-        println!(
-            "  op_count % CHUNK_SIZE_BITS = {}",
-            op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS
-        );
-
         if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            println!("  📍 Taking non-partial chunk path");
-            let result = proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
-            println!("  verify_range_inclusion result: {}", result);
-            return result;
+            return proof.verify_range_inclusion(&mut verifier, &elements, start_pos, root);
         }
 
         // The proof must contain the partial chunk digest as its last hash.
-        println!("  📍 Taking partial chunk path");
         if proof.digests.is_empty() {
-            println!("  ❌ Failed: proof has no digests for partial chunk");
             debug!("proof has no digests");
             return false;
         }
         let mut proof = proof.clone();
         let last_chunk_digest = proof.digests.pop().unwrap();
-        println!("  Removed last digest for partial chunk handling");
 
         // Reconstruct the MMR root.
         let mmr_root = match proof.reconstruct_root(&mut verifier, &elements, start_pos) {
@@ -874,41 +821,22 @@ impl<
     /// equivalent to a grafted proof, then delegates to existing verification logic.
     pub fn historical_range_proof_verify(
         base_proof: &Proof<H::Digest>,
-        bitmap_proof: &Proof<H::Digest>,
+        _bitmap_proof: &Proof<H::Digest>,
         ops: &[Fixed<K, V>],
         chunks: &[[u8; N]],
         start_loc: u64,
         target_root: &H::Digest,
     ) -> bool {
-        println!("🔍 DEBUG: Starting sync_range_proof_verify");
-        println!(
-            "  base_proof.size: {}, digests: {}",
-            base_proof.size,
-            base_proof.digests.len()
-        );
-        println!(
-            "  bitmap_proof.size: {}, digests: {}",
-            bitmap_proof.size,
-            bitmap_proof.digests.len()
-        );
-        println!("  ops.len(): {}", ops.len());
-        println!("  chunks.len(): {}", chunks.len());
-        println!("  start_loc: {}", start_loc);
-
         // Validate basic proof structure and operation range
         let op_count = leaf_pos_to_num(base_proof.size);
         let Some(op_count) = op_count else {
-            println!("❌ DEBUG: verification failed, invalid base proof size");
             debug!("verification failed, invalid base proof size");
             return false;
         };
-        println!("  op_count from base_proof: {}", op_count);
 
         let end_loc = start_loc + ops.len() as u64 - 1;
-        println!("  end_loc: {}", end_loc);
 
         if end_loc >= op_count {
-            println!("❌ DEBUG: verification failed, invalid operation range (end_loc: {}, op_count: {})", end_loc, op_count);
             debug!(
                 loc = end_loc,
                 op_count, "verification failed, invalid operation range"
@@ -918,35 +846,19 @@ impl<
 
         let start_pos = leaf_num_to_pos(start_loc);
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-        println!("  start_pos: {}", start_pos);
-        println!("  elements.len(): {}", elements.len());
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let start_chunk_num = start_loc / Bitmap::<H, N>::CHUNK_SIZE_BITS;
-        println!("  start_chunk_num: {}", start_chunk_num);
-        println!("  grafting_height: {}", Self::grafting_height());
-        println!("  chunk_vec.len(): {}", chunk_vec.len());
 
         let mut verifier =
             GraftingVerifier::<H, &[u8]>::new(Self::grafting_height(), start_chunk_num, &chunk_vec);
 
-        println!("🔍 DEBUG: Using custom base proof verification");
-
         let result = if op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS == 0 {
-            println!("  📍 No partial chunk case");
             base_proof.verify_range_inclusion(&mut verifier, &elements, start_pos, target_root)
         } else {
-            println!("  📍 Has partial chunk case");
-
-            let mmr_root = match base_proof.reconstruct_root(&mut verifier, &elements, start_pos) {
-                Ok(root) => {
-                    println!("  ✅ Reconstructed MMR root successfully");
-                    root
-                }
-                Err(error) => {
-                    println!("  ❌ Failed to reconstruct root: {:?}", error);
-                    return false;
-                }
+            let Ok(mmr_root) = base_proof.reconstruct_root(&mut verifier, &elements, start_pos)
+            else {
+                return false;
             };
 
             let last_chunk = chunks.last().expect("chunks should not be empty");
@@ -955,7 +867,7 @@ impl<
             hasher.inner().update(last_chunk.as_ref());
             let partial_chunk_digest = hasher.inner().finalize();
 
-            let next_bit = (op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS) as u64;
+            let next_bit = op_count % Bitmap::<H, N>::CHUNK_SIZE_BITS;
             let grafted_root = Bitmap::<H, N>::partial_chunk_root(
                 hasher.inner(),
                 &mmr_root,
