@@ -107,8 +107,8 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> impl std::future::Future<Output = Result<Location, adb::Error>> + Send {
-        self.op_count()
+    async fn op_count(&self) -> Result<Location, adb::Error> {
+        self.op_count().await
     }
 
     async fn lower_bound(&self) -> Result<Location, adb::Error> {
