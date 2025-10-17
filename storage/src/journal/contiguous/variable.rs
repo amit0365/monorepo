@@ -19,12 +19,12 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 /// Location of an item in the variable journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Location {
+struct Location {
     /// Section number where the item is stored
-    pub section: u64,
+    section: u64,
 
     /// Offset within the section (u32, aligned to 16 bytes)
-    pub offset: u32,
+    offset: u32,
 }
 
 impl Write for Location {
@@ -491,34 +491,6 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         // no locations index, which is automatically repaired by [Variable::init].
         self.locations.destroy().await?;
         self.data.destroy().await
-    }
-
-    /// Decompose the contiguous journal into its underlying components.
-    ///
-    /// This returns the raw variable journal, locations journal, current size,
-    /// oldest retained position, and items per section. This is useful when
-    /// migrating from contiguous to raw journal management, or for advanced
-    /// use cases that need direct access to the underlying storage.
-    ///
-    /// # Returns
-    ///
-    /// Returns `(data_journal, locations_journal, size, oldest_retained_pos, items_per_section)`.
-    pub fn into_parts(
-        self,
-    ) -> (
-        variable::Journal<E, V>,
-        fixed::Journal<E, Location>,
-        u64,
-        u64,
-        u64,
-    ) {
-        (
-            self.data,
-            self.locations,
-            self.size,
-            self.oldest_retained_pos,
-            self.items_per_section,
-        )
     }
 
     /// Return the section number where the next append will write.
