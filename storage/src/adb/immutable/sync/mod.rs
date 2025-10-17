@@ -975,6 +975,7 @@ mod tests {
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+
             let config = Config {
                 context: context.clone(),
                 db_config: create_sync_config(&format!("bounds_inc_{}", context.next_u64())),

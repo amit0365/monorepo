@@ -111,15 +111,11 @@ where
         self.op_count()
     }
 
-    fn lower_bound(
-        &self,
-    ) -> impl std::future::Future<Output = Result<Location, adb::Error>> + Send {
-        async move {
-            Ok(self
-                .oldest_retained_loc()
-                .await?
-                .unwrap_or(Location::new(0).unwrap()))
-        }
+    async fn lower_bound(&self) -> Result<Location, adb::Error> {
+        Ok(self
+            .oldest_retained_loc()
+            .await?
+            .unwrap_or(Location::new(0).unwrap()))
     }
 
     fn historical_proof(

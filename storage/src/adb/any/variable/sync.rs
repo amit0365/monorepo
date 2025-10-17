@@ -2,7 +2,7 @@ use crate::{
     adb,
     journal::{
         contiguous::{self, Variable as ContiguousVariable},
-        variable::Config as VConfig,
+        variable,
     },
     mmr::Location,
 };
@@ -39,7 +39,7 @@ use tracing::debug;
 /// Returns [adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
 pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
     context: E,
-    cfg: VConfig<V::Cfg>,
+    cfg: variable::Config<V::Cfg>,
     range: Range<u64>,
     items_per_section: NonZeroU64,
 ) -> Result<ContiguousVariable<E, V>, adb::Error> {
@@ -69,10 +69,33 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
 
     let size = journal.size().await?;
 
-    // No existing data - nothing to do
+    // No existing data - initialize at the start of the sync range if needed
     if size == 0 {
-        debug!("no existing journal data, creating fresh journal");
-        return Ok(journal);
+        if range.start == 0 {
+            debug!("no existing journal data, returning empty journal");
+            return Ok(journal);
+        } else {
+            debug!(
+                range.start,
+                "no existing journal data, initializing at sync range start"
+            );
+            journal.destroy().await?;
+            return ContiguousVariable::init_at_size(
+                context,
+                contiguous::Config {
+                    data_partition: format!("{}_data", cfg.partition),
+                    locations_partition: format!("{}_locations", cfg.partition),
+                    items_per_section,
+                    compression: cfg.compression,
+                    codec_config: cfg.codec_config,
+                    buffer_pool: cfg.buffer_pool,
+                    write_buffer: cfg.write_buffer,
+                },
+                range.start,
+            )
+            .await
+            .map_err(Into::into);
+        }
     }
 
     // Check if data exceeds the sync range
@@ -85,10 +108,10 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
         // All data is stale (ends at or before range.start)
         debug!(
             size,
-            range.start, "existing journal data is stale, re-initializing"
+            range.start, "existing journal data is stale, re-initializing at start position"
         );
         journal.destroy().await?;
-        return ContiguousVariable::init(
+        return ContiguousVariable::init_at_size(
             context,
             contiguous::Config {
                 data_partition: format!("{}_data", cfg.partition),
@@ -99,6 +122,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
                 buffer_pool: cfg.buffer_pool,
                 write_buffer: cfg.write_buffer,
             },
+            range.start,
         )
         .await
         .map_err(Into::into);

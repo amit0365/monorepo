@@ -98,14 +98,12 @@ where
         self.root(hasher)
     }
 
-    fn op_count(&self) -> impl std::future::Future<Output = Result<Location, adb::Error>> + Send {
-        async move { Ok(self.op_count()) }
+    async fn op_count(&self) -> Result<Location, adb::Error> {
+        Ok(self.op_count())
     }
 
-    fn lower_bound(
-        &self,
-    ) -> impl std::future::Future<Output = Result<Location, adb::Error>> + Send {
-        async move { Ok(self.inactivity_floor_loc()) }
+    async fn lower_bound(&self) -> Result<Location, adb::Error> {
+        Ok(self.inactivity_floor_loc())
     }
 
     fn historical_proof(
