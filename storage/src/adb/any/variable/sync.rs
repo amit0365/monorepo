@@ -80,7 +80,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
                 "no existing journal data, initializing at sync range start"
             );
             journal.destroy().await?;
-            return ContiguousVariable::init_at_size(
+            return Ok(ContiguousVariable::init_at_size(
                 context,
                 contiguous::Config {
                     data_partition: format!("{}_data", cfg.partition),
@@ -93,8 +93,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
                 },
                 range.start,
             )
-            .await
-            .map_err(Into::into);
+            .await?);
         }
     }
 
@@ -111,7 +110,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
             range.start, "existing journal data is stale, re-initializing at start position"
         );
         journal.destroy().await?;
-        return ContiguousVariable::init_at_size(
+        return Ok(ContiguousVariable::init_at_size(
             context,
             contiguous::Config {
                 data_partition: format!("{}_data", cfg.partition),
@@ -124,8 +123,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
             },
             range.start,
         )
-        .await
-        .map_err(Into::into);
+        .await?);
     }
 
     // Prune to lower bound if needed
@@ -141,11 +139,4 @@ pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
     }
 
     Ok(journal)
-}
-
-#[cfg(test)]
-mod tests {
-    // Tests removed - the init_journal function now returns contiguous::Variable
-    // which abstracts away the section management details that these tests were checking.
-    // Sync integration tests provide coverage for the overall functionality.
 }

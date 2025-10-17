@@ -226,8 +226,22 @@ impl<E: Storage + Metrics, V: Codec + Send> Variable<E, V> {
         })
     }
 
-    /// Initialize a journal at a specific size (in a fully pruned state).
-    /// This is useful for state sync when you need a "fully pruned" journal at a given size.
+    /// Initialize a journal in a fully pruned state at a specific logical size.
+    ///
+    /// This creates a journal that reports `size()` as `start_size` but contains no data.
+    /// The `oldest_retained_pos()` will return `None`, indicating all positions before
+    /// `start_size` have been pruned. This is useful for state sync when starting from
+    /// a non-zero position without historical data.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_size` - The logical size to initialize at. The next append will get position `start_size`.
+    ///
+    /// # Post-conditions
+    ///
+    /// * `size()` returns `start_size`
+    /// * `oldest_retained_pos()` returns `None` (fully pruned)
+    /// * Next append receives position `start_size`
     pub async fn init_at_size(
         context: E,
         cfg: Config<V::Cfg>,
