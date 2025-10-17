@@ -1,5 +1,5 @@
 use crate::{
-    adb::{any::variable::sync::init_journal, immutable, sync, Error},
+    adb::{immutable, sync, Error},
     journal::{contiguous, variable},
     mmr::{Location, StandardHasher as Standard},
     store::operation::Variable,
@@ -10,6 +10,9 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
+
+mod journal;
+use journal::init_journal;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where

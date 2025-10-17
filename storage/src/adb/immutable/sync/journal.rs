@@ -37,7 +37,7 @@ use tracing::debug;
 ///
 /// # Errors
 /// Returns [adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
-pub(crate) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
+pub(super) async fn init_journal<E: Storage + Metrics, V: Codec + Send>(
     context: E,
     cfg: variable::Config<V::Cfg>,
     range: Range<u64>,
