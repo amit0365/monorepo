@@ -161,11 +161,6 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     pub(crate) blobs: BTreeMap<u64, Append<E::Blob>>,
 
-    /// A section number before which all sections have been pruned. This value is not persisted,
-    /// and is initialized to 0 at startup. It's updated only during calls to `prune` during the
-    /// current execution, and therefore provides only a best effort lower-bound on the true value.
-    pub(crate) oldest_retained_section: u64,
-
     pub(crate) tracked: Gauge,
     pub(crate) synced: Counter,
     pub(crate) pruned: Counter,
@@ -213,22 +208,12 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
             context,
             cfg,
             blobs,
-            oldest_retained_section: 0,
             tracked,
             synced,
             pruned,
 
             _phantom: PhantomData,
         })
-    }
-
-    /// Ensures that a section pruned during the current execution is not accessed.
-    fn prune_guard(&self, section: u64) -> Result<(), Error> {
-        if section < self.oldest_retained_section {
-            Err(Error::AlreadyPrunedToSection(self.oldest_retained_section))
-        } else {
-            Ok(())
-        }
     }
 
     /// Reads an item from the blob at the given offset.
@@ -541,9 +526,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// the checksum verification). It is recommended to call `replay` before calling
     /// `append` to prevent this.
     pub async fn append(&mut self, section: u64, item: V) -> Result<(u32, u32), Error> {
-        // Check last pruned
-        self.prune_guard(section)?;
-
         // Create item
         let encoded = item.encode();
         let encoded = if let Some(compression) = self.cfg.compression {
@@ -619,7 +601,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///    previously appended item) will result in an error, with the specific type being
     ///    undefined.
     pub async fn get(&self, section: u64, offset: u32) -> Result<V, Error> {
-        self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Err(Error::SectionOutOfRange(section)),
@@ -638,7 +619,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
     pub async fn get_exact(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
-        self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Err(Error::SectionOutOfRange(section)),
@@ -660,7 +640,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// Returns 0 if the section does not exist.
     pub async fn size(&self, section: u64) -> Result<u64, Error> {
-        self.prune_guard(section)?;
         match self.blobs.get(&section) {
             Some(blob) => Ok(blob.size().await),
             None => Ok(0),
@@ -688,8 +667,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
         // Remove any sections beyond the given section
         let trailing: Vec<u64> = self
             .blobs
@@ -740,8 +717,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// This operation is not guaranteed to survive restarts until sync is called.
     pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-
         // Get the blob at the given section
         let blob = match self.blobs.get_mut(&section) {
             Some(blob) => blob,
@@ -762,7 +737,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
