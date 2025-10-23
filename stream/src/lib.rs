@@ -74,7 +74,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Error as RuntimeError, Sink, Stream};
-use commonware_utils::SystemTimeExt;
+use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -86,8 +86,8 @@ pub enum Error {
     HandshakeError(HandshakeError),
     #[error("unable to decode: {0}")]
     UnableToDecode(CodecError),
-    #[error("peer rejected: {0:X?}")]
-    PeerRejected(Vec<u8>),
+    #[error("peer rejected: {0}")]
+    PeerRejected(String),
     #[error("recv failed")]
     RecvFailed(RuntimeError),
     #[error("recv too large: {0} bytes")]
@@ -232,7 +232,7 @@ pub async fn listen<
         let peer_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let peer = S::PublicKey::decode(peer_bytes)?;
         if !bouncer(peer.clone()).await {
-            return Err(Error::PeerRejected(peer.encode().to_vec()));
+            return Err(Error::PeerRejected(hex(&peer.encode())));
         }
 
         let msg1_bytes = recv_frame(&mut stream, config.max_message_size).await?;
