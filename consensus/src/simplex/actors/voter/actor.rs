@@ -443,6 +443,7 @@ pub struct Actor<
     notarization_latency: Histogram,
     finalization_latency: Histogram,
     recover_latency: histogram::Timed<E>,
+    pending_certifications: Vec<View>,
 }
 
 impl<
@@ -547,6 +548,7 @@ impl<
                 notarization_latency,
                 finalization_latency,
                 recover_latency: histogram::Timed::new(recover_latency, clock),
+                pending_certifications: Vec::new(),
             },
             mailbox,
         )
@@ -983,11 +985,11 @@ impl<
         Some(Request { context, receiver })
     }
 
-    async fn certify(&mut self) -> Option<Request<D, bool>> {
-        let round = self.views.get_mut(&self.view)?;
+    async fn certify(&mut self, view: View) -> Option<Request<D, bool>> {
+        let round = self.views.get_mut(&view)?;
 
         // Request certification only once.
-        if round.requested_proposal_certify {
+        if round.requested_proposal_certify || round.certified_proposal.is_some() {
             return None;
         }
 
@@ -1016,7 +1018,7 @@ impl<
 
         // Set that we requested certification
         self.views
-            .get_mut(&self.view)
+            .get_mut(&view)
             .unwrap()
             .requested_proposal_certify = true;
 
@@ -1233,6 +1235,10 @@ impl<
         }
 
         // Do not yet move to the next view, we need to wait for certification.
+
+        // Queue certification attempt for this view. We'll enqueue the actual
+        // automaton request in the main loop to avoid holding &mut self across await.
+        self.pending_certifications.push(view);
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
@@ -1850,6 +1856,19 @@ impl<
             .update(observed_view, leader.clone(), self.last_finalized)
             .await;
 
+        // Initialize certification pool and backfill any missing certifications after startup
+        let mut certify_pool: FuturesPool<(Context<D>, Result<bool, oneshot::Canceled>)> =
+            Default::default();
+        {
+            let views_to_scan: Vec<View> = self.views.keys().cloned().collect();
+            for view in views_to_scan {
+                if let Some(req) = self.certify(view).await {
+                    let ctx = req.context.clone();
+                    certify_pool.push(async move { (ctx, req.receiver.await) });
+                }
+            }
+        }
+
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
 
@@ -1857,8 +1876,6 @@ impl<
         let mut prev_view: View = self.view;
         let mut pending_propose: Option<Request<D, D>> = None;
         let mut pending_verify: Option<Request<D, bool>> = None;
-        let mut certify_pool: FuturesPool<(Context<D>, Result<bool, oneshot::Canceled>)> =
-            Default::default();
         loop {
             // Drop any pending items if we have moved to a new view
             if prev_view != self.view {
@@ -1878,9 +1895,17 @@ impl<
             }
 
             // Opportunistically enqueue certification requests (keep across view changes)
-            if let Some(req) = self.certify().await {
+            if let Some(req) = self.certify(self.view).await {
                 let ctx = req.context.clone();
                 certify_pool.push(async move { (ctx, req.receiver.await) });
+            }
+
+            // Drain pending certifications triggered by notarizations
+            while let Some(v) = self.pending_certifications.pop() {
+                if let Some(req) = self.certify(v).await {
+                    let ctx = req.context.clone();
+                    certify_pool.push(async move { (ctx, req.receiver.await) });
+                }
             }
 
             // Prepare waiters
