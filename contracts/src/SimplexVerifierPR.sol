@@ -1,5 +1,70 @@
-// // SPDX-License-Identifier: MIT
-// pragma solidity ^0.8.0;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+    // /// @notice Decode varint.
+    // /// @dev https://developers.google.com/protocol-buffers/docs/encoding#varints
+    // /// @param p Position
+    // /// @param buf Buffer
+    // /// @return Success
+    // /// @return New position
+    // /// @return Decoded int
+    // function decode_varint(uint64 p, bytes memory buf)
+    //     internal
+    //     pure
+    //     returns (
+    //         bool,
+    //         uint64,
+    //         uint64
+    //     )
+    // {
+    //     uint64 val;
+    //     uint64 i;
+
+    //     for (i = 0; i < MAX_VARINT_BYTES; i++) {
+    //         // Check that index is within bounds
+    //         if (i + p >= buf.length) {
+    //             return (false, p, 0);
+    //         }
+
+    //         // Get byte at offset
+    //         uint8 b = uint8(buf[p + i]);
+
+    //         // Highest bit is used to indicate if there are more bytes to come
+    //         // Mask to get 7-bit value: 0111 1111
+    //         uint8 v = b & 0x7F;
+
+    //         // Groups of 7 bits are ordered least significant first
+    //         val |= uint64(v) << uint64(i * 7);
+
+    //         // Mask to get keep going bit: 1000 0000
+    //         if (b & 0x80 == 0) {
+    //             // [STRICT]
+    //             // Check for trailing zeroes if more than one byte is used
+    //             // (the value 0 still uses one byte)
+    //             if (i > 0 && v == 0) {
+    //                 return (false, p, 0);
+    //             }
+
+    //             break;
+    //         }
+    //     }
+
+    //     // Check that at most MAX_VARINT_BYTES are used
+    //     if (i >= MAX_VARINT_BYTES) {
+    //         return (false, p, 0);
+    //     }
+
+    //     // [STRICT]
+    //     // If all 10 bytes are used, the last byte (most significant 7 bits)
+    //     // must be at most 0000 0001, since 7*9 = 63
+    //     if (i == MAX_VARINT_BYTES - 1) {
+    //         if (uint8(buf[p + i]) > 1) {
+    //             return (false, p, 0);
+    //         }
+    //     }
+
+    //     return (true, p + i + 1, val);
+    // }
 
 // /// @title SimplexVerifier
 // /// @notice Verifies deserialization of Simplex consensus proofs
