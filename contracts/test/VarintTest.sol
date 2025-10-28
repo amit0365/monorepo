@@ -11,12 +11,42 @@ contract VarintTest is Test, SimplexVerifierBase {
 
     // ============ Test Helpers ============
 
+    /// @notice Public wrapper for decodeVarintU32 to allow external calls in tests
+    /// @dev Calls the internal function from SimplexVerifierBase
+    function decodeVarintU32Wrapper(bytes calldata data, uint256 offset)
+        public pure returns (uint32 value, uint256 newOffset)
+    {
+        return super.decodeVarintU32(data, offset);
+    }
+
     /// @notice Public wrapper for decodeVarintU64 to allow external calls in tests
     /// @dev Calls the internal function from SimplexVerifierBase
     function decodeVarintU64Wrapper(bytes calldata data, uint256 offset)
         public pure returns (uint64 value, uint256 newOffset)
     {
         return super.decodeVarintU64(data, offset);
+    }
+
+    /// @notice Encode a varint u32 (LEB128 format)
+    /// @dev Matches Rust's UInt(u32) wrapper encoding (used for usize)
+    function encodeVarintU32(uint32 value) internal pure returns (bytes memory) {
+        bytes memory result = new bytes(5); // Max 5 bytes for u32
+        uint256 length = 0;
+
+        while (value >= 0x80) {
+            result[length] = bytes1(uint8((value & 0x7F) | 0x80));
+            value >>= 7;
+            length++;
+        }
+        result[length] = bytes1(uint8(value));
+        length++;
+
+        // Trim to actual length
+        bytes memory trimmed = new bytes(length);
+        for (uint256 i = 0; i < length; i++) {
+            trimmed[i] = result[i];
+        }
+        return trimmed;
     }
 
     /// @notice Encode a varint u64 (LEB128 format)
@@ -48,6 +78,180 @@ contract VarintTest is Test, SimplexVerifierBase {
 
         assertEq(decoded, value, "Round trip failed: decoded value mismatch");
         assertEq(bytesRead, encoded.length, "Round trip failed: bytes read mismatch");
+    }
+
+    // ============ U32 Tests ============
+
+    /// @notice Test helper to verify encoding/decoding round trip for u32
+    function testRoundTripU32(uint32 value) internal view {
+        bytes memory encoded = encodeVarintU32(value);
+        (uint32 decoded, uint256 bytesRead) = this.decodeVarintU32Wrapper(encoded, 0);
+
+        assertEq(decoded, value, "Round trip failed: decoded value mismatch");
+        assertEq(bytesRead, encoded.length, "Round trip failed: bytes read mismatch");
+    }
+
+    /// @notice Test u32 single byte values (0-127)
+    function testU32SingleByteValues() public view {
+        // Test value 0
+        bytes memory data = hex"00";
+        (uint32 value, uint256 offset) = this.decodeVarintU32Wrapper(data, 0);
+        assertEq(value, 0);
+        assertEq(offset, 1);
+
+        // Test value 1
+        data = hex"01";
+        (value, offset) = this.decodeVarintU32Wrapper(data, 0);
+        assertEq(value, 1);
+        assertEq(offset, 1);
+
+        // Test value 127 (0x7F - maximum single byte)
+        data = hex"7F";
+        (value, offset) = this.decodeVarintU32Wrapper(data, 0);
+        assertEq(value, 127);
+        assertEq(offset, 1);
+    }
+
+    /// @notice Test u32 two byte values
+    function testU32TwoByteValues() public {
+        // Test value 128 (0x80, 0x01)
+        bytes memory data = hex"8001";
+        (uint32 value, uint256 offset) = this.decodeVarintU32Wrapper(data, 0);
+        assertEq(value, 128);
+        assertEq(offset, 2);
+
+        // Test value 300
+        data = hex"AC02";
+        (value, offset) = this.decodeVarintU32Wrapper(data, 0);
+        assertEq(value, 300);
+        assertEq(offset, 2);
+
+        // Test value 16383 (0xFF, 0x7F)
+        data = hex"FF7F";
+        (value, offset) = this.decodeVarintU32Wrapper(data, 0);
+        assertEq(value, 16383);
+        assertEq(offset, 2);
+    }
+
+    /// @notice Test u32 maximum value
+    function testU32MaxValue() public {
+        // u32::MAX = 4294967295 (0xFF, 0xFF, 0xFF, 0xFF, 0x0F)
+        bytes memory data = hex"FFFFFFFF0F";
+        (uint32 value, uint256 offset) = this.decodeVarintU32Wrapper(data, 0);
+        assertEq(value, type(uint32).max);
+        assertEq(offset, 5);
+    }
+
+    /// @notice Test u32 round trips for common values
+    function testU32RoundTrips() public {
+        // Test common values used for Vec lengths
+        testRoundTripU32(0);
+        testRoundTripU32(1);
+        testRoundTripU32(10);
+        testRoundTripU32(100);
+        testRoundTripU32(127);
+        testRoundTripU32(128);
+        testRoundTripU32(255);
+        testRoundTripU32(256);
+        testRoundTripU32(1000);
+        testRoundTripU32(10000);
+        testRoundTripU32(65535); // u16::MAX
+        testRoundTripU32(type(uint32).max);
+    }
+
+    /// @notice Test u32 overflow detection on 5th byte
+    function testU32RejectOverflow() public {
+        // 5th byte must be at most 0x0F for u32
+        // Test 0x10 on 5th byte (would overflow u32)
+        bytes memory data = hex"FFFFFFFF10";
+        vm.expectRevert(InvalidVarint.selector);
+        this.decodeVarintU32Wrapper(data, 0);
+
+        // Test 0xFF on 5th byte (definitely overflows)
+        data = hex"FFFFFFFF7F";
+        vm.expectRevert(InvalidVarint.selector);
+        this.decodeVarintU32Wrapper(data, 0);
+    }
+
+    /// @notice Test u32 rejects non-canonical encoding
+    function testU32RejectNonCanonical() public {
+        // [0x80, 0x00] is non-canonical for 0
+        bytes memory data = hex"8000";
+        vm.expectRevert(InvalidVarint.selector);
+        this.decodeVarintU32Wrapper(data, 0);
+
+        // [0xFF, 0x00] is non-canonical
+        data = hex"FF00";
+        vm.expectRevert(InvalidVarint.selector);
+        this.decodeVarintU32Wrapper(data, 0);
+    }
+
+    /// @notice Test u32 empty buffer
+    function testU32EmptyBuffer() public {
+        bytes memory data = "";
+        vm.expectRevert(InvalidVarint.selector);
+        this.decodeVarintU32Wrapper(data, 0);
+    }
+
+    /// @notice Test u32 incomplete varint
+    function testU32IncompleteVarint() public {
+        bytes memory data = hex"80"; // Continuation bit set but no following byte
+        vm.expectRevert(InvalidVarint.selector);
+        this.decodeVarintU32Wrapper(data, 0);
+    }
+
+    /// @notice Test u32 conformity with Rust encoding
+    function testU32ConformityValues() public {
+        // These should match Rust codec/src/types/primitives.rs:437-444
+        bytes memory encoded = encodeVarintU32(0);
+        assertEq(encoded, hex"00");
+
+        encoded = encodeVarintU32(1);
+        assertEq(encoded, hex"01");
+
+        encoded = encodeVarintU32(127);
+        assertEq(encoded, hex"7F");
+
+        encoded = encodeVarintU32(128);
+        assertEq(encoded, hex"8001");
+
+        // u32::MAX as usize
+        encoded = encodeVarintU32(type(uint32).max);
+        assertEq(encoded, hex"FFFFFFFF0F");
+    }
+
+    /// @notice Fuzz test for u32 round-trip encoding/decoding
+    /// @param value Any u32 value to test
+    function testFuzzU32RoundTrip(uint32 value) public {
+        testRoundTripU32(value);
+    }
+
+    /// @notice Test u32 multiple varints in sequence (simulating Vec<Vec<T>>)
+    function testU32MultipleVarints() public {
+        // Encode three Vec lengths: 5, 100, 1000
+        bytes memory data = abi.encodePacked(
+            encodeVarintU32(5),
+            encodeVarintU32(100),
+            encodeVarintU32(1000)
+        );
+
+        uint256 offset = 0;
+        uint32 value;
+
+        // Decode first length
+        (value, offset) = this.decodeVarintU32Wrapper(data, offset);
+        assertEq(value, 5);
+
+        // Decode second length
+        (value, offset) = this.decodeVarintU32Wrapper(data, offset);
+        assertEq(value, 100);
+
+        // Decode third length
+        (value, offset) = this.decodeVarintU32Wrapper(data, offset);
+        assertEq(value, 1000);
+
+        // Should have consumed all data
+        assertEq(offset, data.length);
     }
 
     // ============ Basic Tests ============

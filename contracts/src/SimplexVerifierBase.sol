@@ -21,6 +21,7 @@ abstract contract SimplexVerifierBase {
 
     error InvalidProofLength();
     error InvalidVarint();
+    error InvalidBitmapTrailingBits();
     error TooManySigners();
     error EpochMismatch();
     error ViewMismatch();
@@ -54,7 +55,7 @@ abstract contract SimplexVerifierBase {
     // ============ Shared Helper Functions ============
 
     /// @notice Decode a varint-encoded u64 (LEB128 format)
-    /// @dev Used for: parent view, vote counts
+    /// @dev Used for: parent view, epoch, view counter
     /// @dev Rust uses varint via UInt wrapper (commonware_codec::varint::UInt)
     /// @dev Implements strict canonical encoding validation matching Rust implementation
     function decodeVarintU64(bytes calldata data, uint256 offset)
@@ -101,6 +102,30 @@ abstract contract SimplexVerifierBase {
         }
 
         return (value, currentOffset);
+    }
+
+    /// @notice Decode a varint as u32 by validating a u64 varint fits in 32 bits
+    /// @dev Decodes using decodeVarintU64 then validates upper 32 bits are zero
+    /// @dev This enforces strict canonical encoding: values > u32::MAX must fail
+    /// @param data The calldata containing the varint-encoded value
+    /// @param offset The starting position in data
+    /// @return value The decoded u32 value
+    /// @return newOffset The position after the decoded varint
+    function decodeVarintU32(bytes calldata data, uint256 offset)
+        internal pure returns (uint32 value, uint256 newOffset)
+    {
+        // Decode as u64 first
+        uint64 val64;
+        (val64, newOffset) = decodeVarintU64(data, offset);
+        
+        // [STRICT] Validate that highest 32 bits are zero
+        // This ensures the value fits in u32 range [0, 2^32-1]
+        if (val64 & 0xFFFFFFFF00000000 != 0) {
+            revert InvalidVarint();
+        }
+        
+        // Safe to cast since we verified upper bits are zero
+        value = uint32(val64);
     }
 
     /// @notice Deserialize a Round

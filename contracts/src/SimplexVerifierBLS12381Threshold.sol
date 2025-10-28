@@ -50,6 +50,30 @@ contract SimplexVerifierBLS12381Threshold is SimplexVerifierBase {
         bytes seedSignature;  // Recovered aggregate seed signature
     }
 
+    /// @notice Notarization certificate (threshold signature on a proposal)
+    /// @dev Rust: pub struct Notarization<S: Scheme, D: Digest> { proposal: Proposal<D>, certificate: S::Certificate }
+    /// @dev For BLS Threshold: Certificate = Signature (aggregate, not individual votes)
+    struct Notarization {
+        Proposal proposal;
+        ThresholdCertificate certificate;
+    }
+
+    /// @notice Nullification certificate (threshold signature on a round)
+    /// @dev Rust: pub struct Nullification<S: Scheme> { round: Round, certificate: S::Certificate }
+    /// @dev For BLS Threshold: Certificate = Signature (aggregate, not individual votes)
+    struct Nullification {
+        Round round;
+        ThresholdCertificate certificate;
+    }
+
+    /// @notice Finalization certificate (threshold signature on a proposal)
+    /// @dev Rust: pub struct Finalization<S: Scheme, D: Digest> { proposal: Proposal<D>, certificate: S::Certificate }
+    /// @dev For BLS Threshold: Certificate = Signature (aggregate, not individual votes)
+    struct Finalization {
+        Proposal proposal;
+        ThresholdCertificate certificate;
+    }
+
     /// @notice Randomness seed derived from threshold signature
     /// @dev Rust: pub struct Seed<V> { round: Round, signature: V::Signature }
     /// @dev Write impl (bls12381_threshold.rs:230-234)
@@ -144,35 +168,38 @@ contract SimplexVerifierBLS12381Threshold is SimplexVerifierBase {
     /// @dev No individual votes! Fixed 192 bytes regardless of validator count
     /// @dev Format: Proposal + ThresholdCertificate (vote_sig + seed_sig)
     function deserializeNotarizationMinPk(bytes calldata proof)
-        public pure returns (Proposal memory proposal, ThresholdCertificate memory cert)
+        public pure returns (Notarization memory notarization)
     {
         uint256 offset = 0;
-        (proposal, offset) = deserializeProposal(proof, offset);
-        (cert, offset) = deserializeCertificateMinPk(proof, offset);
+        (notarization.proposal, offset) = deserializeProposal(proof, offset);
+        (notarization.certificate, offset) = deserializeCertificateMinPk(proof, offset);
 
         if (offset != proof.length) revert InvalidProofLength();
-        return (proposal, cert);
+        return notarization;
     }
 
     /// @notice Deserialize a Nullification certificate
     /// @dev Format: Round + ThresholdCertificate
     function deserializeNullificationMinPk(bytes calldata proof)
-        public pure returns (Round memory round, ThresholdCertificate memory cert)
+        public pure returns (Nullification memory nullification)
     {
         uint256 offset = 0;
-        (round, offset) = deserializeRound(proof, offset);
-        (cert, offset) = deserializeCertificateMinPk(proof, offset);
+        (nullification.round, offset) = deserializeRound(proof, offset);
+        (nullification.certificate, offset) = deserializeCertificateMinPk(proof, offset);
 
         if (offset != proof.length) revert InvalidProofLength();
-        return (round, cert);
+        return nullification;
     }
 
     /// @notice Deserialize a Finalization certificate
     /// @dev Identical structure to Notarization
     function deserializeFinalizationMinPk(bytes calldata proof)
-        public pure returns (Proposal memory proposal, ThresholdCertificate memory cert)
+        public pure returns (Finalization memory finalization)
     {
-        return deserializeNotarizationMinPk(proof);
+        Notarization memory notarization = deserializeNotarizationMinPk(proof);
+        finalization.proposal = notarization.proposal;
+        finalization.certificate = notarization.certificate;
+        return finalization;
     }
 
     /// @notice Deserialize a Seed (randomness beacon)

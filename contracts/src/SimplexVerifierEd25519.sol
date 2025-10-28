@@ -25,6 +25,41 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
         bytes signature;  // 64 bytes
     }
 
+    /// @notice Certificate formed by collecting Ed25519 signatures plus their signer indices
+    /// @dev Rust: pub struct Certificate { signers: Signers, signatures: Vec<Ed25519Signature> }
+    /// @dev Rust impl: consensus/src/simplex/signing_scheme/ed25519.rs:102-107
+    /// @dev Write impl (ed25519.rs:110-114):
+    ///      self.signers.write(writer);     // Bitmap (u64 length + bytes)
+    ///      self.signatures.write(writer);  // Vec<Signature> (varint count + 64 bytes each)
+    struct Certificate {
+        bytes signersBitmap;      // Bitmap of validator indices that signed
+        bytes[] signatures;       // Ed25519 signatures ordered by signer index
+    }
+
+    /// @notice Notarization certificate (quorum of Notarize votes on a proposal)
+    /// @dev Rust: pub struct Notarization<S: Scheme, D: Digest> { proposal: Proposal<D>, certificate: S::Certificate }
+    /// @dev For Ed25519: Certificate = { signers: Signers, signatures: Vec<Ed25519Signature> }
+    struct Notarization {
+        Proposal proposal;
+        Certificate certificate;
+    }
+
+    /// @notice Nullification certificate (quorum of Nullify votes on a round)
+    /// @dev Rust: pub struct Nullification<S: Scheme> { round: Round, certificate: S::Certificate }
+    /// @dev For Ed25519: Certificate = { signers: Signers, signatures: Vec<Ed25519Signature> }
+    struct Nullification {
+        Round round;
+        Certificate certificate;
+    }
+
+    /// @notice Finalization certificate (quorum of Finalize votes on a proposal)
+    /// @dev Rust: pub struct Finalization<S: Scheme, D: Digest> { proposal: Proposal<D>, certificate: S::Certificate }
+    /// @dev For Ed25519: Certificate = { signers: Signers, signatures: Vec<Ed25519Signature> }
+    struct Finalization {
+        Proposal proposal;
+        Certificate certificate;
+    }
+
     // ============ Vote Deserialization ============
 
     /// @notice Deserialize a single Ed25519 vote
@@ -97,8 +132,8 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
     /// @param bitIndex The index of the bit to retrieve
     /// @return true if the bit is set, false otherwise
     function getBit(bytes memory bitmap, uint256 bitIndex) internal pure returns (bool) {
-        uint256 byteIndex = bitIndex / 8;
-        uint256 bitInByte = bitIndex % 8;
+        uint256 byteIndex = bitIndex >> 3; // divide by 8
+        uint256 bitInByte = bitIndex & 7;  // modulo 8
 
         if (byteIndex >= bitmap.length) return false;
 
@@ -118,7 +153,7 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
     /// @return bitmapLengthInBits The number of bits in the bitmap
     /// @return signersBitmap The bitmap bytes
     /// @return newOffset Updated offset after reading the bitmap
-    function deserializeSignersBitmap(bytes calldata proof, uint256 offset)
+    function deserializeSignersBitmap(bytes calldata proof, uint256 offset, uint32 maxParticipants)
         public pure returns (uint64 bitmapLengthInBits, bytes memory signersBitmap, uint256 newOffset)
     {
         // Read bitmap length (8 bytes big-endian u64)
@@ -126,13 +161,26 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
         bitmapLengthInBits = uint64(bytes8(proof[offset:offset+8]));
         offset += 8;
 
+        // Bound the bitmap length by the maximum participants (upper bound)
+        if (bitmapLengthInBits > maxParticipants) revert TooManySigners();
+
         // Calculate number of bytes needed for bitmap
-        uint256 numBitmapBytes = (bitmapLengthInBits + 7) / 8;
+        uint256 numBitmapBytes = (bitmapLengthInBits + 7) >> 3; // divide by 8
 
         // Read bitmap bytes
         if (offset + numBitmapBytes > proof.length) revert InvalidProofLength();
         signersBitmap = proof[offset:offset + numBitmapBytes];
         offset += numBitmapBytes;
+
+        // Enforce trailing-zero bits in the last byte when length is not byte-aligned
+        uint256 remainder = bitmapLengthInBits & 7;
+        if (remainder != 0 && numBitmapBytes > 0) {
+            uint8 lastByte = uint8(signersBitmap[numBitmapBytes - 1]);
+            // Allowed lower bits mask: (1 << remainder) - 1
+            uint8 allowedLower = uint8((1 << remainder) - 1);
+            // Upper bits (beyond bitmap length) must be zero
+            if ((lastByte & ~allowedLower) != 0) revert InvalidBitmapTrailingBits();
+        }
 
         return (bitmapLengthInBits, signersBitmap, offset);
     }
@@ -157,9 +205,9 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
         public pure returns (Vote[] memory votes, uint256 newOffset)
     {
         // Read Vec<Signature> - varint count
-        uint64 signatureCountU64;
-        (signatureCountU64, offset) = decodeVarintU64(proof, offset);
-        uint32 signatureCount = uint32(signatureCountU64);
+        // Rust encodes Vec length as usize, which is encoded as u32 varint
+        uint32 signatureCount;
+        (signatureCount, offset) = decodeVarintU32(proof, offset);
 
         if (signatureCount > maxSigners) revert TooManySigners();
 
@@ -187,65 +235,78 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
     /// @dev This is the core Certificate deserialization shared by all certificate types
     /// @dev Uses helper functions for modularity and testability:
     ///      - deserializeSignersBitmap: Reads bitmap indicating which signers are present
-    ///      - deserializeSignatures: Reads signatures and reconstructs votes
+    ///      - deserializeSignatures: Reads signatures (not votes!)
     /// @dev Full encoding structure (consensus/src/simplex/signing_scheme/ed25519.rs:110-114):
     ///      1. Signers bitmap (u64 length + raw bytes)
     ///      2. Signatures (varint count + 64 bytes each)
+    /// @dev Rust: pub struct Certificate { signers: Signers, signatures: Vec<Ed25519Signature> }
     /// @param proof The encoded proof bytes
     /// @param offset The current offset in the proof
     /// @param maxSigners Maximum allowed signers (for DoS protection)
-    /// @return votes Array of reconstructed votes (signer index + signature)
+    /// @return certificate The deserialized certificate
     /// @return newOffset Updated offset after reading the certificate
     function deserializeCertificate(bytes calldata proof, uint256 offset, uint32 maxSigners)
-        internal pure returns (Vote[] memory votes, uint256 newOffset)
+        internal pure returns (Certificate memory certificate, uint256 newOffset)
     {
         // Read signers bitmap
         uint64 bitmapLengthInBits;
-        bytes memory signersBitmap;
-        (bitmapLengthInBits, signersBitmap, offset) = deserializeSignersBitmap(proof, offset);
+        (bitmapLengthInBits, certificate.signersBitmap, offset) = deserializeSignersBitmap(proof, offset, maxSigners);
 
-        // Read signatures and reconstruct votes
-        (votes, offset) = deserializeSignatures(proof, offset, signersBitmap, maxSigners);
+        // Read signatures (varint count + raw signature bytes)
+        uint32 signatureCount;
+        (signatureCount, offset) = decodeVarintU32(proof, offset);
 
-        return (votes, offset);
+        if (signatureCount > maxSigners) revert TooManySigners();
+
+        certificate.signatures = new bytes[](signatureCount);
+        for (uint32 i = 0; i < signatureCount; i++) {
+            if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert InvalidProofLength();
+            certificate.signatures[i] = proof[offset:offset + ED25519_SIGNATURE_LENGTH];
+            offset += ED25519_SIGNATURE_LENGTH;
+        }
+
+        return (certificate, offset);
     }
 
     /// @notice Deserialize a Notarization certificate (quorum of Notarize votes)
     /// @dev Encoding: Proposal + Certificate (bitmap + signatures)
     /// @dev Rust: Notarization { proposal: Proposal, certificate: Certificate }
     function deserializeNotarization(bytes calldata proof, uint32 maxSigners)
-        public pure returns (Proposal memory proposal, Vote[] memory votes)
+        public pure returns (Notarization memory notarization)
     {
         uint256 offset = 0;
 
-        (proposal, offset) = deserializeProposal(proof, offset);
-        (votes, offset) = deserializeCertificate(proof, offset, maxSigners);
+        (notarization.proposal, offset) = deserializeProposal(proof, offset);
+        (notarization.certificate, offset) = deserializeCertificate(proof, offset, maxSigners);
 
         if (offset != proof.length) revert InvalidProofLength();
-        return (proposal, votes);
+        return notarization;
     }
 
     /// @notice Deserialize a Nullification certificate (quorum of Nullify votes)
     /// @dev Encoding: Round + Certificate (bitmap + signatures)
     /// @dev Rust: Nullification { round: Round, certificate: Certificate }
     function deserializeNullification(bytes calldata proof, uint32 maxSigners)
-        public pure returns (Round memory round, Vote[] memory votes)
+        public pure returns (Nullification memory nullification)
     {
         uint256 offset = 0;
 
-        (round, offset) = deserializeRound(proof, offset);
-        (votes, offset) = deserializeCertificate(proof, offset, maxSigners);
+        (nullification.round, offset) = deserializeRound(proof, offset);
+        (nullification.certificate, offset) = deserializeCertificate(proof, offset, maxSigners);
 
         if (offset != proof.length) revert InvalidProofLength();
-        return (round, votes);
+        return nullification;
     }
 
     /// @notice Deserialize a Finalization certificate
     /// @dev Identical structure to Notarization
     function deserializeFinalization(bytes calldata proof, uint32 maxSigners)
-        public pure returns (Proposal memory proposal, Vote[] memory votes)
+        public pure returns (Finalization memory finalization)
     {
-        return deserializeNotarization(proof, maxSigners);
+        Notarization memory notarization = deserializeNotarization(proof, maxSigners);
+        finalization.proposal = notarization.proposal;
+        finalization.certificate = notarization.certificate;
+        return finalization;
     }
 
     // ============ Fraud Proof Deserialization ============
