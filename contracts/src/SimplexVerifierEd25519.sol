@@ -22,7 +22,7 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
     ///      self.signature.write(writer);   // 64 bytes (Ed25519)
     struct Vote {
         uint32 signer;
-        bytes signature;  // 64 bytes
+        bytes signature;  // 64 bytes, raw signature bytes , we do not reconstruct the rust struct here
     }
 
     /// @notice Certificate formed by collecting Ed25519 signatures plus their signer indices
@@ -70,7 +70,7 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
         // Read signer: 4 bytes big-endian (primitives.rs:53)
         if (offset + 4 > data.length) revert InvalidProofLength();
         vote.signer = uint32(bytes4(data[offset:offset+4]));
-        offset += 4;
+        offset += 4; 
 
         // Read Ed25519 signature: 64 bytes
         if (offset + ED25519_SIGNATURE_LENGTH > data.length) revert InvalidProofLength();
@@ -131,6 +131,7 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
     /// @param bitmap The bitmap bytes
     /// @param bitIndex The index of the bit to retrieve
     /// @return true if the bit is set, false otherwise
+    /// TODO: To be used in signature verification.
     function getBit(bytes memory bitmap, uint256 bitIndex) internal pure returns (bool) {
         uint256 byteIndex = bitIndex >> 3; // divide by 8
         uint256 bitInByte = bitIndex & 7;  // modulo 8
@@ -172,10 +173,11 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
         signersBitmap = proof[offset:offset + numBitmapBytes];
         offset += numBitmapBytes;
 
-        // Enforce trailing-zero bits in the last byte when length is not byte-aligned
+        // Count set bits and enforce trailing-zero bits validation
+        uint256 fullBytes = bitmapLengthInBits >> 3;
         uint256 remainder = bitmapLengthInBits & 7;
         if (remainder != 0 && numBitmapBytes > 0) {
-            uint8 lastByte = uint8(signersBitmap[numBitmapBytes - 1]);
+            uint8 lastByte = uint8(signersBitmap[fullBytes]);
             // Allowed lower bits mask: (1 << remainder) - 1
             uint8 allowedLower = uint8((1 << remainder) - 1);
             // Upper bits (beyond bitmap length) must be zero
@@ -185,49 +187,6 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
         return (bitmapLengthInBits, signersBitmap, offset);
     }
 
-    /// @notice Deserialize Ed25519 signatures and reconstruct votes from bitmap
-    /// @dev Reads Vec<Signature> with varint count, then matches signatures to signers from bitmap
-    /// @dev Encoding format:
-    ///      - signature_count: varint (usize as u32)
-    ///      - signatures: signature_count * 64 bytes (Ed25519)
-    /// @param proof The encoded proof bytes
-    /// @param offset The starting offset in the proof
-    /// @param signersBitmap The bitmap indicating which signers are present
-    /// @param maxSigners Maximum allowed signers (for DoS protection)
-    /// @return votes Array of reconstructed votes (signer index + signature)
-    /// @return newOffset Updated offset after reading all signatures
-    function deserializeSignatures(
-        bytes calldata proof,
-        uint256 offset,
-        bytes memory signersBitmap,
-        uint32 maxSigners
-    )
-        public pure returns (Vote[] memory votes, uint256 newOffset)
-    {
-        // Read Vec<Signature> - varint count
-        // Rust encodes Vec length as usize, which is encoded as u32 varint
-        uint32 signatureCount;
-        (signatureCount, offset) = decodeVarintU32(proof, offset);
-
-        if (signatureCount > maxSigners) revert TooManySigners();
-
-        // Read all signatures and reconstruct votes
-        votes = new Vote[](signatureCount);
-        uint32 signerIndex = 0;
-        for (uint32 i = 0; i < signatureCount; i++) {
-            // Find next signer from bitmap
-            while (!getBit(signersBitmap, signerIndex)) {
-                signerIndex++;
-            }
-
-            votes[i].signer = signerIndex;
-            votes[i].signature = proof[offset:offset + ED25519_SIGNATURE_LENGTH];
-            offset += ED25519_SIGNATURE_LENGTH;
-            signerIndex++;
-        }
-
-        return (votes, offset);
-    }
 
     // ============ Certificate Deserialization ============
 
@@ -309,7 +268,6 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
         return finalization;
     }
 
-    // ============ Fraud Proof Deserialization ============
 
     /// @notice Deserialize ConflictingNotarize proof
     /// @dev Rust: pub struct ConflictingNotarize<S, D> { first: Notarize, second: Notarize }
@@ -336,7 +294,7 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
 
         // Validate Byzantine behavior: same round, same signer, different proposals
         validateRoundsMatch(proposal1.round, proposal2.round);
-        if (vote1.signer != vote2.signer) revert SignerMismatch();
+        if (vote1.signer != vote2.signer) revert Conflicting_SignerMismatch();
         validateProposalsDiffer(proposal1, proposal2);
 
         return (proposal1, vote1, proposal2, vote2);
@@ -344,7 +302,7 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
 
     /// @notice Deserialize ConflictingFinalize proof
     /// @dev Rust: pub struct ConflictingFinalize<S, D> { first: Finalize, second: Finalize }
-    /// @dev Identical structure to ConflictingNotarize
+    /// @dev Identical to ConflictingNotarize but for Finalize.
     function deserializeConflictingFinalize(bytes calldata proof)
         public pure returns (
             Proposal memory proposal1,
@@ -384,7 +342,7 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
 
         // Validate Byzantine behavior: same round, same signer
         validateRoundsMatch(nullifyRound, finalizeProposal.round);
-        if (nullifyVote.signer != finalizeVote.signer) revert SignerMismatch();
+        if (nullifyVote.signer != finalizeVote.signer) revert Conflicting_SignerMismatch();
 
         return (nullifyRound, nullifyVote, finalizeProposal, finalizeVote);
     }

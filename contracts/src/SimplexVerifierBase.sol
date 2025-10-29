@@ -22,11 +22,12 @@ abstract contract SimplexVerifierBase {
     error InvalidProofLength();
     error InvalidVarint();
     error InvalidBitmapTrailingBits();
+    error InvalidBitmapSignatureCount();
     error TooManySigners();
-    error EpochMismatch();
-    error ViewMismatch();
-    error SignerMismatch();
-    error ProposalsMustDiffer();
+    error Conflicting_EpochMismatch();
+    error Conflicting_ViewMismatch();
+    error Conflicting_SignerMismatch();
+    error Conflicting_ProposalsMustDiffer();
 
     // ============ Structs ============
 
@@ -171,14 +172,14 @@ abstract contract SimplexVerifierBase {
 
     /// @notice Validate that two rounds are identical
     function validateRoundsMatch(Round memory r1, Round memory r2) internal pure {
-        if (r1.epoch != r2.epoch) revert EpochMismatch();
-        if (r1.viewCounter != r2.viewCounter) revert ViewMismatch();
+        if (r1.epoch != r2.epoch) revert Conflicting_EpochMismatch();
+        if (r1.viewCounter != r2.viewCounter) revert Conflicting_ViewMismatch();
     }
 
     /// @notice Validate that two proposals differ
     function validateProposalsDiffer(Proposal memory p1, Proposal memory p2) internal pure {
         if (keccak256(abi.encode(p1)) == keccak256(abi.encode(p2))) {
-            revert ProposalsMustDiffer();
+            revert Conflicting_ProposalsMustDiffer();
         }
     }
 }

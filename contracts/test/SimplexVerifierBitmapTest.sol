@@ -205,8 +205,10 @@ contract SimplexVerifierBitmapTest is Test {
         // Bitmap bytes: (none)
         bytes memory proof = abi.encodePacked(uint64(0));
 
-        (uint64 bitmapLength, bytes memory bitmap, uint256 newOffset) =
+        (uint64 bitmapLength, bytes memory bitmap, uint32 signerCount, uint256 newOffset) =
             verifier.deserializeSignersBitmap(proof, 0, 0);
+
+        assertEq(signerCount, 0); // Zero set bits
 
         assertEq(bitmapLength, 0);
         assertEq(bitmap.length, 0);
@@ -218,10 +220,11 @@ contract SimplexVerifierBitmapTest is Test {
         // Bitmap bytes: 0x01 (1 byte for 1 bit)
         bytes memory proof = abi.encodePacked(uint64(1), hex"01");
 
-        (uint64 bitmapLength, bytes memory bitmap, uint256 newOffset) =
+        (uint64 bitmapLength, bytes memory bitmap, uint32 signerCount, uint256 newOffset) =
             verifier.deserializeSignersBitmap(proof, 0, 1);
 
         assertEq(bitmapLength, 1);
+        assertEq(signerCount, 1); // One set bit
         assertEq(bitmap.length, 1);
         assertEq(uint8(bitmap[0]), 0x01);
         assertEq(newOffset, 9);
@@ -232,10 +235,11 @@ contract SimplexVerifierBitmapTest is Test {
         // Bitmap bytes: 0xFF (1 byte for 8 bits)
         bytes memory proof = abi.encodePacked(uint64(8), hex"FF");
 
-        (uint64 bitmapLength, bytes memory bitmap, uint256 newOffset) =
+        (uint64 bitmapLength, bytes memory bitmap, uint32 signerCount, uint256 newOffset) =
             verifier.deserializeSignersBitmap(proof, 0, 8);
 
         assertEq(bitmapLength, 8);
+        assertEq(signerCount, 8); // All 8 bits set
         assertEq(bitmap.length, 1);
         assertEq(uint8(bitmap[0]), 0xFF);
         assertEq(newOffset, 9);
@@ -246,7 +250,7 @@ contract SimplexVerifierBitmapTest is Test {
         // Bitmap bytes: 0xFF 0x01 (2 bytes for 9 bits)
         bytes memory proof = abi.encodePacked(uint64(9), hex"FF01");
 
-        (uint64 bitmapLength, bytes memory bitmap, uint256 newOffset) =
+        (uint64 bitmapLength, bytes memory bitmap, uint32 signerCount, uint256 newOffset) =
             verifier.deserializeSignersBitmap(proof, 0, 9);
 
         assertEq(bitmapLength, 9);
@@ -262,7 +266,7 @@ contract SimplexVerifierBitmapTest is Test {
         bytes memory bitmapData = hex"0123456789ABCDEF";
         bytes memory proof = abi.encodePacked(uint64(64), bitmapData);
 
-        (uint64 bitmapLength, bytes memory bitmap, uint256 newOffset) =
+        (uint64 bitmapLength, bytes memory bitmap, uint32 signerCount, uint256 newOffset) =
             verifier.deserializeSignersBitmap(proof, 0, 64);
 
         assertEq(bitmapLength, 64);
@@ -277,7 +281,7 @@ contract SimplexVerifierBitmapTest is Test {
         bytes memory bitmapData = hex"AA55";
         bytes memory proof = abi.encodePacked(prefix, uint64(16), bitmapData);
 
-        (uint64 bitmapLength, bytes memory bitmap, uint256 newOffset) =
+        (uint64 bitmapLength, bytes memory bitmap, uint32 signerCount, uint256 newOffset) =
             verifier.deserializeSignersBitmap(proof, 4, 16);
 
         assertEq(bitmapLength, 16);
@@ -294,7 +298,7 @@ contract SimplexVerifierBitmapTest is Test {
         }
         bytes memory proof = abi.encodePacked(uint64(1000), bitmapData);
 
-        (uint64 bitmapLength, bytes memory bitmap, uint256 newOffset) =
+        (uint64 bitmapLength, bytes memory bitmap, uint32 signerCount, uint256 newOffset) =
             verifier.deserializeSignersBitmap(proof, 0, 1000);
 
         assertEq(bitmapLength, 1000);
@@ -308,20 +312,22 @@ contract SimplexVerifierBitmapTest is Test {
 
         // 7 bits = 1 byte
         bytes memory proof7 = abi.encodePacked(uint64(7), hex"7F");
-        (uint64 len7, bytes memory bitmap7,) = verifier.deserializeSignersBitmap(proof7, 0, 7);
+        (uint64 len7, bytes memory bitmap7, uint32 count7,) = verifier.deserializeSignersBitmap(proof7, 0, 7);
         assertEq(len7, 7);
         assertEq(bitmap7.length, 1);
 
-        // 15 bits = 2 bytes
-        bytes memory proof15 = abi.encodePacked(uint64(15), hex"FFFF");
-        (uint64 len15, bytes memory bitmap15,) = verifier.deserializeSignersBitmap(proof15, 0, 15);
+        // 15 bits = 2 bytes (0xFFFF has bit 15 set, so use 0xFF7F - only lower 15 bits)
+        bytes memory proof15 = abi.encodePacked(uint64(15), hex"FF7F"); // Lower 15 bits all set
+        (uint64 len15, bytes memory bitmap15, uint32 count15,) = verifier.deserializeSignersBitmap(proof15, 0, 15);
         assertEq(len15, 15);
+        assertEq(count15, 15); // All 15 bits set
         assertEq(bitmap15.length, 2);
 
-        // 17 bits = 3 bytes
-        bytes memory proof17 = abi.encodePacked(uint64(17), hex"FFFFFF");
-        (uint64 len17, bytes memory bitmap17,) = verifier.deserializeSignersBitmap(proof17, 0, 17);
+        // 17 bits = 3 bytes (0xFFFFFF has upper bits set, so use 0xFFFF01 - only lower 17 bits)
+        bytes memory proof17 = abi.encodePacked(uint64(17), hex"FFFF01"); // Lower 17 bits all set
+        (uint64 len17, bytes memory bitmap17, uint32 count17,) = verifier.deserializeSignersBitmap(proof17, 0, 17);
         assertEq(len17, 17);
+        assertEq(count17, 17); // All 17 bits set
         assertEq(bitmap17.length, 3);
     }
 
@@ -632,10 +638,11 @@ contract SimplexVerifierBitmapTest is Test {
         }
 
         // Deserialize bitmap
-        (uint64 bitmapLength, bytes memory deserializedBitmap, uint256 offset) =
+        (uint64 bitmapLength, bytes memory deserializedBitmap, uint32 signerCount, uint256 offset) =
             verifier.deserializeSignersBitmap(proof, 0, 16);
 
         assertEq(bitmapLength, 16);
+        assertEq(signerCount, 4); // 4 bits set
         assertEq(deserializedBitmap, bitmap);
 
         // Deserialize signatures
@@ -675,10 +682,11 @@ contract SimplexVerifierBitmapTest is Test {
         }
 
         // Step 1: Deserialize bitmap
-        (uint64 bitmapLength, bytes memory deserializedBitmap, uint256 offset) =
+        (uint64 bitmapLength, bytes memory deserializedBitmap, uint32 signerCount, uint256 offset) =
             verifier.deserializeSignersBitmap(proof, 0, 10);
 
         assertEq(bitmapLength, 10);
+        assertEq(signerCount, 7); // 7 bits set
 
         // Step 2: Verify bitmap bits
         assertTrue(verifier.getBit_exposed(deserializedBitmap, 0));
@@ -744,8 +752,10 @@ contract SimplexVerifierBitmapTest is Test {
             proof = abi.encodePacked(proof, dummySignatureWithIndex(i));
         }
 
-        (uint64 bitmapLength, bytes memory deserializedBitmap, uint256 offset) =
+        (uint64 bitmapLength, bytes memory deserializedBitmap, uint32 signerCount, uint256 offset) =
             verifier.deserializeSignersBitmap(proof, 0, 21);
+
+        assertEq(signerCount, 14); // 14 bits set
 
         (TestableSimplexVerifier.Vote[] memory votes,) =
             verifier.deserializeSignatures(proof, offset, deserializedBitmap, 30);
