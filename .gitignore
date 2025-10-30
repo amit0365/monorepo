@@ -17,6 +17,9 @@ CLAUDE.md
 contracts/cache/
 contracts/out/
 contracts/broadcast/
-contracts/lib/
 contracts/.env
 contracts/.env.*
+*.skip.bak
+contracts/test/*.bak
+*.skip
+*.sol.skip

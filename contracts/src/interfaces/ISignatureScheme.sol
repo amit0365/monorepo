@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.24;
+
+import {BLS2} from "bls-solidity/libraries/BLS2.sol";
 
 /// @notice Hash function choices for message hashing
 enum HashFunction {
     SHA256,
-    BLAKE2B,
     KECCAK256
+    // BLAKE2B  // Not supported yet
 }
 
 /// @title IAttributableScheme
 /// @notice Interface for signature schemes with individual attributable signatures
 /// @dev Used for schemes like Ed25519 where each signature can be attributed to a specific signer
-/// @dev Certificates contain arrays of individual signatures that can prove liveness/faults
+/// @dev Pure cryptographic operations only - no certificate format knowledge
 interface IAttributableScheme {
     /// @notice Get the unique identifier for this signature scheme
     /// @return Scheme identifier string (e.g., "ED25519")
@@ -30,24 +32,6 @@ interface IAttributableScheme {
     /// @return Number of participants
     function participantCount() external view returns (uint32);
 
-    /// @notice Deserialize a certificate from proof data
-    /// @dev Certificate format: bitmap + array of individual signatures
-    /// @param proof The encoded proof bytes
-    /// @param offset Starting position in proof
-    /// @param maxSigners Maximum allowed signers (for DoS protection)
-    /// @return signers Array of signer indices
-    /// @return signatures Array of signature bytes (parallel to signers array)
-    /// @return newOffset Updated offset after reading the certificate
-    function deserializeCertificate(
-        bytes calldata proof,
-        uint256 offset,
-        uint32 maxSigners
-    ) external pure returns (
-        uint32[] memory signers,
-        bytes[] memory signatures,
-        uint256 newOffset
-    );
-
     /// @notice Hash the message and verify all signatures
     /// @dev Hashes message using HASH_FUNCTION, then verifies each signature
     /// @param message The message bytes to verify
@@ -64,7 +48,7 @@ interface IAttributableScheme {
 /// @title IAggregatedScheme
 /// @notice Interface for signature schemes with aggregated signatures
 /// @dev Used for schemes like BLS multisig where multiple signatures combine into one
-/// @dev Certificates contain a single aggregated signature + bitmap of signers
+/// @dev Pure cryptographic operations only - no certificate format knowledge
 interface IAggregatedScheme {
     /// @notice Get the unique identifier for this signature scheme
     /// @return Scheme identifier string (e.g., "BLS12381_MULTISIG")
@@ -83,24 +67,6 @@ interface IAggregatedScheme {
     /// @return Number of participants
     function participantCount() external view returns (uint32);
 
-    /// @notice Deserialize a certificate from proof data
-    /// @dev Certificate format: bitmap + single aggregated signature
-    /// @param proof The encoded proof bytes
-    /// @param offset Starting position in proof
-    /// @param maxSigners Maximum allowed signers (for DoS protection)
-    /// @return signersBitmap Bitmap indicating which signers contributed
-    /// @return signature Single aggregated signature bytes
-    /// @return newOffset Updated offset after reading the certificate
-    function deserializeCertificate(
-        bytes calldata proof,
-        uint256 offset,
-        uint32 maxSigners
-    ) external pure returns (
-        bytes memory signersBitmap,
-        bytes memory signature,
-        uint256 newOffset
-    );
-
     /// @notice Hash the message and verify the aggregated signature
     /// @dev Aggregates public keys for signers in bitmap, then verifies
     /// @param message The message bytes to verify
@@ -117,7 +83,7 @@ interface IAggregatedScheme {
 /// @title IThresholdScheme
 /// @notice Interface for threshold signature schemes
 /// @dev Used for schemes like BLS threshold where t-of-n partial signatures combine
-/// @dev Certificates contain only the recovered threshold signature (no signer info)
+/// @dev Pure cryptographic operations only - no certificate format knowledge
 /// @dev Individual signatures cannot prove faults (threshold allows forgery)
 interface IThresholdScheme {
     /// @notice Get the unique identifier for this signature scheme
@@ -137,20 +103,6 @@ interface IThresholdScheme {
     /// @dev Even though there's one threshold key, we track participant count
     /// @return Number of participants
     function participantCount() external view returns (uint32);
-
-    /// @notice Deserialize a certificate from proof data
-    /// @dev Certificate format: just the threshold signature (no signer info)
-    /// @param proof The encoded proof bytes
-    /// @param offset Starting position in proof
-    /// @return signature Threshold signature bytes
-    /// @return newOffset Updated offset after reading the certificate
-    function deserializeCertificate(
-        bytes calldata proof,
-        uint256 offset
-    ) external pure returns (
-        bytes memory signature,
-        uint256 newOffset
-    );
 
     /// @notice Hash the message and verify the threshold signature
     /// @dev Verifies against the single threshold public key

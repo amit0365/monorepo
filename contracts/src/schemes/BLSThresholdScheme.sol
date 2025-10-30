@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.24;
 
-import "../interfaces/ISignatureScheme.sol";
-import "../libraries/BLS2.sol";
+import {IThresholdScheme, BLS2, HashFunction} from "../interfaces/ISignatureScheme.sol";
 
 /// @title BLSThresholdScheme
 /// @notice BLS12-381 threshold signature scheme implementation
@@ -10,15 +9,14 @@ import "../libraries/BLS2.sol";
 /// @dev This scheme uses a single threshold public key shared by all participants
 /// @dev Certificates contain only the recovered aggregate signature (no signer info)
 /// @dev WARNING: Individual signatures are NOT attributable (threshold allows forgery)
-/// @dev Uses MinPk variant: Threshold key in G2 (96 bytes), Signatures in G1 (48 bytes)
+/// @dev Uses MinSig variant: Threshold key in G2 (96 bytes), Signatures in G1 (48 bytes)
 contract BLSThresholdScheme is IThresholdScheme {
     // ============ Constants ============
 
-    uint256 constant BLS_SIGNATURE_LENGTH = 48; // G1 for MinPk variant
+    uint256 constant BLS_SIGNATURE_LENGTH = 48; // G1 for MinSig variant
 
     // ============ Errors ============
 
-    error InvalidProofLength();
     error EmptyParticipants();
     error UnknownHashFunction();
 
@@ -57,10 +55,19 @@ contract BLSThresholdScheme is IThresholdScheme {
         n = _n;
         hashFunction = _hashFunction;
 
-        // Build domain separation tag
+        // Build domain separation tag based on hash function
+        string memory hashSpec;
+        if (_hashFunction == HashFunction.SHA256) {
+            hashSpec = "-BLS12381G1_XMD:SHA-256_SSWU_RO_";
+        } else if (_hashFunction == HashFunction.KECCAK256) {
+            hashSpec = "-BLS12381G1_XMD:KECCAK-256_SSWU_RO_";
+        } else {
+            revert UnknownHashFunction();
+        }
+
         DST = abi.encodePacked(
             application,
-            "-BLS12381G1_XMD:SHA-256_SSWU_RO_",
+            hashSpec,
             _bytes32ToHex(bytes32(block.chainid)),
             "_"
         );
@@ -89,57 +96,21 @@ contract BLSThresholdScheme is IThresholdScheme {
     }
 
     /// @inheritdoc IThresholdScheme
-    function deserializeCertificate(
-        bytes calldata proof,
-        uint256 offset
-    ) external pure returns (
-        bytes memory signature,
-        uint256 newOffset
-    ) {
-        // Read threshold signature (48 bytes for MinPk)
-        if (offset + BLS_SIGNATURE_LENGTH > proof.length) revert InvalidProofLength();
-        signature = proof[offset:offset + BLS_SIGNATURE_LENGTH];
-        return (signature, offset + BLS_SIGNATURE_LENGTH);
-    }
-
-    /// @inheritdoc IThresholdScheme
     function hashAndVerify(
         bytes calldata message,
         bytes calldata signature
     ) external view returns (bool) {
-        // Hash the message
-        bytes32 messageHash = _hash(message);
-
-        // Hash to BLS point on G1
-        BLS2.PointG1 memory messagePoint = BLS2.hashToG1(messageHash, DST);
+        // Hash to BLS point on G1 using BLS2.hashToPoint
+        // Note: BLS2.hashToPoint internally uses the hash function from DST
+        BLS2.PointG1 memory messagePoint = BLS2.hashToPoint(DST, message);
 
         // Verify threshold signature against threshold public key
         BLS2.PointG1 memory sig = BLS2.g1Unmarshal(signature);
-        return BLS2.pairing(messagePoint, thresholdPublicKey, sig);
+        (bool pairingSuccess, bool callSuccess) = BLS2.verifySingle(sig, thresholdPublicKey, messagePoint);
+        return pairingSuccess && callSuccess;
     }
 
     // ============ Internal Helpers ============
-
-    /// @notice Hash data using the configured hash function
-    /// @param data Data to hash
-    /// @return Hash digest (32 bytes)
-    function _hash(bytes memory data) internal view returns (bytes32) {
-        if (hashFunction == HashFunction.SHA256) {
-            return sha256(data);
-        } else if (hashFunction == HashFunction.KECCAK256) {
-            return keccak256(data);
-        } else if (hashFunction == HashFunction.BLAKE2B) {
-            return _blake2b(data);
-        }
-        revert UnknownHashFunction();
-    }
-
-    /// @notice Placeholder for BLAKE2B hashing
-    /// @dev To be implemented with precompile or library
-    function _blake2b(bytes memory data) internal pure returns (bytes32) {
-        // TODO: Implement BLAKE2B using precompile at address 0x09
-        revert("BLAKE2B not implemented");
-    }
 
     /// @notice Convert bytes32 to hex string
     /// @param data Bytes to convert

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.24;
 
-import "../interfaces/ISignatureScheme.sol";
-import "../libraries/BLS2.sol";
+import {IAggregatedScheme, BLS2, HashFunction} from "../interfaces/ISignatureScheme.sol";
+import {CodecHelpers} from "../libraries/CodecHelpers.sol";
 
 /// @title BLSMultisigScheme
 /// @notice BLS12-381 multisig scheme implementation (aggregated signatures)
@@ -15,20 +15,9 @@ contract BLSMultisigScheme is IAggregatedScheme {
 
     uint256 constant BLS_SIGNATURE_LENGTH = 48; // G1 for MinPk variant
 
-    // Varint decoding constants
-    uint8 internal constant DATA_BITS_MASK = 0x7F;
-    uint8 internal constant CONTINUATION_BIT_MASK = 0x80;
-    uint256 internal constant DATA_BITS_PER_BYTE = 7;
-    uint256 internal constant MAX_U64_BITS = 64;
-    uint256 internal constant U64_LAST_BYTE_SHIFT = 63;
-
     // ============ Errors ============
 
-    error InvalidProofLength();
-    error InvalidVarint();
     error InvalidSignerIndex();
-    error TooManySigners();
-    error InvalidBitmapTrailingBits();
     error EmptyPublicKeys();
     error UnknownHashFunction();
     error NoSignersInBitmap();
@@ -65,10 +54,19 @@ contract BLSMultisigScheme is IAggregatedScheme {
 
         hashFunction = _hashFunction;
 
-        // Build domain separation tag
+        // Build domain separation tag based on hash function
+        string memory hashSpec;
+        if (_hashFunction == HashFunction.SHA256) {
+            hashSpec = "-BLS12381G1_XMD:SHA-256_SSWU_RO_";
+        } else if (_hashFunction == HashFunction.KECCAK256) {
+            hashSpec = "-BLS12381G1_XMD:KECCAK-256_SSWU_RO_";
+        } else {
+            revert UnknownHashFunction();
+        }
+
         DST = abi.encodePacked(
             application,
-            "-BLS12381G1_XMD:SHA-256_SSWU_RO_",
+            hashSpec,
             _bytes32ToHex(bytes32(block.chainid)),
             "_"
         );
@@ -98,39 +96,14 @@ contract BLSMultisigScheme is IAggregatedScheme {
     }
 
     /// @inheritdoc IAggregatedScheme
-    function deserializeCertificate(
-        bytes calldata proof,
-        uint256 offset,
-        uint32 maxSigners
-    ) external pure returns (
-        bytes memory signersBitmap,
-        bytes memory signature,
-        uint256 newOffset
-    ) {
-        // Read bitmap
-        uint64 bitmapLengthInBits;
-        (bitmapLengthInBits, signersBitmap, offset) =
-            _deserializeSignersBitmap(proof, offset, maxSigners);
-
-        // Read single aggregated signature (48 bytes for MinPk)
-        if (offset + BLS_SIGNATURE_LENGTH > proof.length) revert InvalidProofLength();
-        signature = proof[offset:offset + BLS_SIGNATURE_LENGTH];
-        offset += BLS_SIGNATURE_LENGTH;
-
-        return (signersBitmap, signature, offset);
-    }
-
-    /// @inheritdoc IAggregatedScheme
     function hashAndVerify(
         bytes calldata message,
         bytes calldata signersBitmap,
         bytes calldata signature
     ) external view returns (bool) {
-        // Hash the message
-        bytes32 messageHash = _hash(message);
-
-        // Hash to BLS point on G1
-        BLS2.PointG1 memory messagePoint = BLS2.hashToG1(messageHash, DST);
+        // Hash message to BLS point on G1 using hash-to-curve
+        // Note: BLS2.hashToPoint takes raw message bytes, not pre-hashed
+        BLS2.PointG1 memory messagePoint = BLS2.hashToPoint(DST, message);
 
         // Aggregate public keys for signers in bitmap
         BLS2.PointG2 memory aggregatedPubKey = _aggregatePublicKeys(signersBitmap);
@@ -150,17 +123,8 @@ contract BLSMultisigScheme is IAggregatedScheme {
             return sha256(data);
         } else if (hashFunction == HashFunction.KECCAK256) {
             return keccak256(data);
-        } else if (hashFunction == HashFunction.BLAKE2B) {
-            return _blake2b(data);
         }
         revert UnknownHashFunction();
-    }
-
-    /// @notice Placeholder for BLAKE2B hashing
-    /// @dev To be implemented with precompile or library
-    function _blake2b(bytes memory data) internal pure returns (bytes32) {
-        // TODO: Implement BLAKE2B using precompile at address 0x09
-        revert("BLAKE2B not implemented");
     }
 
     /// @notice Aggregate public keys for signers indicated in bitmap
@@ -172,7 +136,7 @@ contract BLSMultisigScheme is IAggregatedScheme {
         bool first = true;
 
         for (uint32 i = 0; i < publicKeys.length; i++) {
-            if (_getBit(bitmap, i)) {
+            if (CodecHelpers.getBit(bitmap, i)) {
                 if (first) {
                     result = publicKeys[i];
                     first = false;
@@ -184,61 +148,6 @@ contract BLSMultisigScheme is IAggregatedScheme {
 
         if (first) revert NoSignersInBitmap();
         return result;
-    }
-
-    /// @notice Get bit value from bitmap
-    /// @param bitmap Bitmap bytes
-    /// @param index Bit index to check
-    /// @return true if bit is set
-    function _getBit(bytes memory bitmap, uint256 index) internal pure returns (bool) {
-        uint256 byteIndex = index >> 3;
-        uint256 bitIndex = index & 7;
-        if (byteIndex >= bitmap.length) return false;
-        return (uint8(bitmap[byteIndex]) & (1 << bitIndex)) != 0;
-    }
-
-    /// @notice Deserialize signers bitmap from proof data
-    /// @param proof The encoded proof bytes
-    /// @param offset Starting position in proof
-    /// @param maxParticipants Maximum allowed participants
-    /// @return bitmapLengthInBits Number of bits in bitmap
-    /// @return signersBitmap Bitmap bytes
-    /// @return newOffset Updated offset
-    function _deserializeSignersBitmap(
-        bytes calldata proof,
-        uint256 offset,
-        uint32 maxParticipants
-    ) internal pure returns (
-        uint64 bitmapLengthInBits,
-        bytes memory signersBitmap,
-        uint256 newOffset
-    ) {
-        // Read bitmap length (8 bytes big-endian u64)
-        if (offset + 8 > proof.length) revert InvalidProofLength();
-        bitmapLengthInBits = uint64(bytes8(proof[offset:offset+8]));
-        offset += 8;
-
-        // Bound the bitmap length
-        if (bitmapLengthInBits > maxParticipants) revert TooManySigners();
-
-        // Calculate number of bytes needed
-        uint256 numBitmapBytes = (bitmapLengthInBits + 7) >> 3;
-
-        // Read bitmap bytes
-        if (offset + numBitmapBytes > proof.length) revert InvalidProofLength();
-        signersBitmap = proof[offset:offset + numBitmapBytes];
-        offset += numBitmapBytes;
-
-        // Validate trailing bits are zero
-        uint256 fullBytes = bitmapLengthInBits >> 3;
-        uint256 remainder = bitmapLengthInBits & 7;
-        if (remainder != 0 && numBitmapBytes > 0) {
-            uint8 lastByte = uint8(signersBitmap[fullBytes]);
-            uint8 allowedLower = uint8((1 << remainder) - 1);
-            if ((lastByte & ~allowedLower) != 0) revert InvalidBitmapTrailingBits();
-        }
-
-        return (bitmapLengthInBits, signersBitmap, offset);
     }
 
     /// @notice Convert bytes32 to hex string

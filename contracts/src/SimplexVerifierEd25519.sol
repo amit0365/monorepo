@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.24;
 
 import "./SimplexVerifierBase.sol";
+import {CodecHelpers} from "./libraries/CodecHelpers.sol";
+import {HashFunction} from "./interfaces/ISignatureScheme.sol";
 
 /// @title SimplexVerifierEd25519
 /// @notice Ed25519 signing scheme implementation for Simplex consensus proofs
@@ -13,302 +15,241 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
 
     uint256 constant ED25519_SIGNATURE_LENGTH = 64;
 
-    // ============ Structs ============
-
-    /// @notice Vote contains a signer index and Ed25519 signature
-    /// @dev Rust: pub struct Vote<S: Scheme> { signer: u32, signature: S::Signature }
-    /// @dev Write impl (consensus/src/simplex/types.rs:103-107):
-    ///      self.signer.write(writer);      // 4 bytes big-endian u32
-    ///      self.signature.write(writer);   // 64 bytes (Ed25519)
-    struct Vote {
-        uint32 signer;
-        bytes signature;  // 64 bytes, raw signature bytes , we do not reconstruct the rust struct here
-    }
-
-    /// @notice Certificate formed by collecting Ed25519 signatures plus their signer indices
-    /// @dev Rust: pub struct Certificate { signers: Signers, signatures: Vec<Ed25519Signature> }
-    /// @dev Rust impl: consensus/src/simplex/signing_scheme/ed25519.rs:102-107
-    /// @dev Write impl (ed25519.rs:110-114):
-    ///      self.signers.write(writer);     // Bitmap (u64 length + bytes)
-    ///      self.signatures.write(writer);  // Vec<Signature> (varint count + 64 bytes each)
-    struct Certificate {
-        bytes signersBitmap;      // Bitmap of validator indices that signed
-        bytes[] signatures;       // Ed25519 signatures ordered by signer index
-    }
-
-    /// @notice Notarization certificate (quorum of Notarize votes on a proposal)
-    /// @dev Rust: pub struct Notarization<S: Scheme, D: Digest> { proposal: Proposal<D>, certificate: S::Certificate }
-    /// @dev For Ed25519: Certificate = { signers: Signers, signatures: Vec<Ed25519Signature> }
-    struct Notarization {
-        Proposal proposal;
-        Certificate certificate;
-    }
-
-    /// @notice Nullification certificate (quorum of Nullify votes on a round)
-    /// @dev Rust: pub struct Nullification<S: Scheme> { round: Round, certificate: S::Certificate }
-    /// @dev For Ed25519: Certificate = { signers: Signers, signatures: Vec<Ed25519Signature> }
-    struct Nullification {
-        Round round;
-        Certificate certificate;
-    }
-
-    /// @notice Finalization certificate (quorum of Finalize votes on a proposal)
-    /// @dev Rust: pub struct Finalization<S: Scheme, D: Digest> { proposal: Proposal<D>, certificate: S::Certificate }
-    /// @dev For Ed25519: Certificate = { signers: Signers, signatures: Vec<Ed25519Signature> }
-    struct Finalization {
-        Proposal proposal;
-        Certificate certificate;
-    }
-
-    // ============ Vote Deserialization ============
-
-    /// @notice Deserialize a single Ed25519 vote
-    /// @dev Rust Write impl (consensus/src/simplex/types.rs:103-107)
-    function deserializeVote(bytes calldata data, uint256 offset)
-        internal pure returns (Vote memory vote, uint256 newOffset)
-    {
-        // Read signer: 4 bytes big-endian (primitives.rs:53)
-        if (offset + 4 > data.length) revert InvalidProofLength();
-        vote.signer = uint32(bytes4(data[offset:offset+4]));
-        offset += 4; 
-
-        // Read Ed25519 signature: 64 bytes
-        if (offset + ED25519_SIGNATURE_LENGTH > data.length) revert InvalidProofLength();
-        vote.signature = data[offset:offset+ED25519_SIGNATURE_LENGTH];
-        offset += ED25519_SIGNATURE_LENGTH;
-
-        return (vote, offset);
-    }
-
     // ============ Individual Activity Deserialization ============
 
     /// @notice Deserialize a Notarize message
     /// @dev Rust: pub struct Notarize<S, D> { proposal: Proposal<D>, vote: Vote<S> }
-    /// @dev Write impl (consensus/src/simplex/types.rs:915-919):
-    ///      self.proposal.write(writer);  // Proposal
-    ///      self.vote.write(writer);      // Vote
+    /// @dev Format: proposal_bytes + signer (4 bytes) + signature (64 bytes)
+    /// @param proof The serialized proof bytes
+    /// @return proposalBytes Raw proposal bytes for verification
+    /// @return signer The signer index
+    /// @return signature The Ed25519 signature bytes
     function deserializeNotarize(bytes calldata proof)
-        public pure returns (Proposal memory proposal, Vote memory vote)
+        public pure returns (
+            bytes calldata proposalBytes,
+            uint32 signer,
+            bytes calldata signature
+        )
     {
         uint256 offset = 0;
-        (proposal, offset) = deserializeProposal(proof, offset);
-        (vote, offset) = deserializeVote(proof, offset);
 
-        if (offset != proof.length) revert InvalidProofLength();
-        return (proposal, vote);
+        // Extract proposal bytes
+        (proposalBytes, offset) = extractProposalBytes(proof, offset);
+
+        // Read signer: 4 bytes big-endian
+        if (offset + 4 > proof.length) revert CodecHelpers.InvalidProofLength();
+        signer = uint32(bytes4(proof[offset:offset+4]));
+        offset += 4;
+
+        // Read signature: 64 bytes
+        if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert CodecHelpers.InvalidProofLength();
+        signature = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+        offset += ED25519_SIGNATURE_LENGTH;
+
+        if (offset != proof.length) revert CodecHelpers.InvalidProofLength();
+        return (proposalBytes, signer, signature);
     }
 
     /// @notice Deserialize a Nullify message
     /// @dev Rust: pub struct Nullify<S> { round: Round, vote: Vote<S> }
-    /// @dev Write impl (consensus/src/simplex/types.rs:1122-1126):
-    ///      self.round.write(writer);  // Round
-    ///      self.vote.write(writer);   // Vote
+    /// @dev Format: round_bytes (16 bytes) + signer (4 bytes) + signature (64 bytes)
+    /// @param proof The serialized proof bytes
+    /// @return roundBytes Raw round bytes for verification
+    /// @return signer The signer index
+    /// @return signature The Ed25519 signature bytes
     function deserializeNullify(bytes calldata proof)
-        public pure returns (Round memory round, Vote memory vote)
+        public pure returns (
+            bytes calldata roundBytes,
+            uint32 signer,
+            bytes calldata signature
+        )
     {
         uint256 offset = 0;
-        (round, offset) = deserializeRound(proof, offset);
-        (vote, offset) = deserializeVote(proof, offset);
 
-        if (offset != proof.length) revert InvalidProofLength();
-        return (round, vote);
+        // Extract round bytes
+        (roundBytes, offset) = extractRoundBytes(proof, offset);
+
+        // Read signer: 4 bytes big-endian
+        if (offset + 4 > proof.length) revert CodecHelpers.InvalidProofLength();
+        signer = uint32(bytes4(proof[offset:offset+4]));
+        offset += 4;
+
+        // Read signature: 64 bytes
+        if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert CodecHelpers.InvalidProofLength();
+        signature = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+        offset += ED25519_SIGNATURE_LENGTH;
+
+        if (offset != proof.length) revert CodecHelpers.InvalidProofLength();
+        return (roundBytes, signer, signature);
     }
 
     /// @notice Deserialize a Finalize message
-    /// @dev Rust: pub struct Finalize<S, D> { proposal: Proposal<D>, vote: Vote<S> }
     /// @dev Identical structure to Notarize
     function deserializeFinalize(bytes calldata proof)
-        public pure returns (Proposal memory proposal, Vote memory vote)
+        public pure returns (
+            bytes calldata proposalBytes,
+            uint32 signer,
+            bytes calldata signature
+        )
     {
         return deserializeNotarize(proof);
     }
 
-    // ============ Bitmap Helper ============
-
-    /// @notice Get the value of a bit in a bitmap
-    /// @dev Matches Rust BitMap implementation (utils/src/bitmap/mod.rs)
-    /// @dev Bits are stored with lowest order bits first within each byte
-    /// @param bitmap The bitmap bytes
-    /// @param bitIndex The index of the bit to retrieve
-    /// @return true if the bit is set, false otherwise
-    /// TODO: To be used in signature verification.
-    function getBit(bytes memory bitmap, uint256 bitIndex) internal pure returns (bool) {
-        uint256 byteIndex = bitIndex >> 3; // divide by 8
-        uint256 bitInByte = bitIndex & 7;  // modulo 8
-
-        if (byteIndex >= bitmap.length) return false;
-
-        uint8 byteValue = uint8(bitmap[byteIndex]);
-        uint8 mask = uint8(1 << bitInByte);
-        return (byteValue & mask) != 0;
-    }
-
-    // ============ Deserialization Helpers ============
-
-    /// @notice Deserialize signers bitmap from proof data
-    /// @dev Encoding format (consensus/src/simplex/signing_scheme/ed25519.rs:110-114):
-    ///      - bitmap_length: u64 (8 bytes big-endian)
-    ///      - bitmap_bytes: (bitmap_length + 7) / 8 bytes
-    /// @param proof The encoded proof bytes
-    /// @param offset The starting offset in the proof
-    /// @return bitmapLengthInBits The number of bits in the bitmap
-    /// @return signersBitmap The bitmap bytes
-    /// @return newOffset Updated offset after reading the bitmap
-    function deserializeSignersBitmap(bytes calldata proof, uint256 offset, uint32 maxParticipants)
-        public pure returns (uint64 bitmapLengthInBits, bytes memory signersBitmap, uint256 newOffset)
-    {
-        // Read bitmap length (8 bytes big-endian u64)
-        if (offset + 8 > proof.length) revert InvalidProofLength();
-        bitmapLengthInBits = uint64(bytes8(proof[offset:offset+8]));
-        offset += 8;
-
-        // Bound the bitmap length by the maximum participants (upper bound)
-        if (bitmapLengthInBits > maxParticipants) revert TooManySigners();
-
-        // Calculate number of bytes needed for bitmap
-        uint256 numBitmapBytes = (bitmapLengthInBits + 7) >> 3; // divide by 8
-
-        // Read bitmap bytes
-        if (offset + numBitmapBytes > proof.length) revert InvalidProofLength();
-        signersBitmap = proof[offset:offset + numBitmapBytes];
-        offset += numBitmapBytes;
-
-        // Count set bits and enforce trailing-zero bits validation
-        uint256 fullBytes = bitmapLengthInBits >> 3;
-        uint256 remainder = bitmapLengthInBits & 7;
-        if (remainder != 0 && numBitmapBytes > 0) {
-            uint8 lastByte = uint8(signersBitmap[fullBytes]);
-            // Allowed lower bits mask: (1 << remainder) - 1
-            uint8 allowedLower = uint8((1 << remainder) - 1);
-            // Upper bits (beyond bitmap length) must be zero
-            if ((lastByte & ~allowedLower) != 0) revert InvalidBitmapTrailingBits();
-        }
-
-        return (bitmapLengthInBits, signersBitmap, offset);
-    }
-
-
     // ============ Certificate Deserialization ============
-
-    /// @notice Deserialize an Ed25519 Certificate (bitmap + signatures)
-    /// @dev This is the core Certificate deserialization shared by all certificate types
-    /// @dev Uses helper functions for modularity and testability:
-    ///      - deserializeSignersBitmap: Reads bitmap indicating which signers are present
-    ///      - deserializeSignatures: Reads signatures (not votes!)
-    /// @dev Full encoding structure (consensus/src/simplex/signing_scheme/ed25519.rs:110-114):
-    ///      1. Signers bitmap (u64 length + raw bytes)
-    ///      2. Signatures (varint count + 64 bytes each)
-    /// @dev Rust: pub struct Certificate { signers: Signers, signatures: Vec<Ed25519Signature> }
-    /// @param proof The encoded proof bytes
-    /// @param offset The current offset in the proof
-    /// @param maxSigners Maximum allowed signers (for DoS protection)
-    /// @return certificate The deserialized certificate
-    /// @return newOffset Updated offset after reading the certificate
-    function deserializeCertificate(bytes calldata proof, uint256 offset, uint32 maxSigners)
-        internal pure returns (Certificate memory certificate, uint256 newOffset)
-    {
-        // Read signers bitmap
-        uint64 bitmapLengthInBits;
-        (bitmapLengthInBits, certificate.signersBitmap, offset) = deserializeSignersBitmap(proof, offset, maxSigners);
-
-        // Read signatures (varint count + raw signature bytes)
-        uint32 signatureCount;
-        (signatureCount, offset) = decodeVarintU32(proof, offset);
-
-        if (signatureCount > maxSigners) revert TooManySigners();
-
-        certificate.signatures = new bytes[](signatureCount);
-        for (uint32 i = 0; i < signatureCount; i++) {
-            if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert InvalidProofLength();
-            certificate.signatures[i] = proof[offset:offset + ED25519_SIGNATURE_LENGTH];
-            offset += ED25519_SIGNATURE_LENGTH;
-        }
-
-        return (certificate, offset);
-    }
 
     /// @notice Deserialize a Notarization certificate (quorum of Notarize votes)
     /// @dev Encoding: Proposal + Certificate (bitmap + signatures)
     /// @dev Rust: Notarization { proposal: Proposal, certificate: Certificate }
+    /// @param proof The serialized proof bytes
+    /// @param maxSigners Maximum allowed signers (for DoS protection)
+    /// @return proposalBytes Raw proposal bytes for verification
+    /// @return signersBitmap Bitmap of validator indices that signed
+    /// @return signatureCount Number of signatures
     function deserializeNotarization(bytes calldata proof, uint32 maxSigners)
-        public pure returns (Notarization memory notarization)
+        public pure returns (
+            bytes calldata proposalBytes,
+            bytes memory signersBitmap,
+            uint32 signatureCount
+        )
     {
         uint256 offset = 0;
 
-        (notarization.proposal, offset) = deserializeProposal(proof, offset);
-        (notarization.certificate, offset) = deserializeCertificate(proof, offset, maxSigners);
+        // Extract proposal bytes
+        (proposalBytes, offset) = extractProposalBytes(proof, offset);
 
-        if (offset != proof.length) revert InvalidProofLength();
-        return notarization;
+        // Read signers bitmap
+        uint64 bitmapLengthInBits;
+        (bitmapLengthInBits, signersBitmap, offset) = CodecHelpers.deserializeSignersBitmap(proof, offset, maxSigners);
+
+        // Read signature count (varint)
+        (signatureCount, offset) = CodecHelpers.decodeVarintU32(proof, offset);
+
+        if (signatureCount > maxSigners) revert CodecHelpers.TooManySigners();
+
+        // Validate remaining length matches signature count
+        uint256 expectedRemaining = signatureCount * ED25519_SIGNATURE_LENGTH;
+        if (offset + expectedRemaining != proof.length) revert CodecHelpers.InvalidProofLength();
+
+        return (proposalBytes, signersBitmap, signatureCount);
     }
 
     /// @notice Deserialize a Nullification certificate (quorum of Nullify votes)
     /// @dev Encoding: Round + Certificate (bitmap + signatures)
     /// @dev Rust: Nullification { round: Round, certificate: Certificate }
+    /// @param proof The serialized proof bytes
+    /// @param maxSigners Maximum allowed signers (for DoS protection)
+    /// @return roundBytes Raw round bytes for verification
+    /// @return signersBitmap Bitmap of validator indices that signed
+    /// @return signatureCount Number of signatures
     function deserializeNullification(bytes calldata proof, uint32 maxSigners)
-        public pure returns (Nullification memory nullification)
+        public pure returns (
+            bytes calldata roundBytes,
+            bytes memory signersBitmap,
+            uint32 signatureCount
+        )
     {
         uint256 offset = 0;
 
-        (nullification.round, offset) = deserializeRound(proof, offset);
-        (nullification.certificate, offset) = deserializeCertificate(proof, offset, maxSigners);
+        // Extract round bytes
+        (roundBytes, offset) = extractRoundBytes(proof, offset);
 
-        if (offset != proof.length) revert InvalidProofLength();
-        return nullification;
+        // Read signers bitmap
+        uint64 bitmapLengthInBits;
+        (bitmapLengthInBits, signersBitmap, offset) = CodecHelpers.deserializeSignersBitmap(proof, offset, maxSigners);
+
+        // Read signature count (varint)
+        (signatureCount, offset) = CodecHelpers.decodeVarintU32(proof, offset);
+
+        if (signatureCount > maxSigners) revert CodecHelpers.TooManySigners();
+
+        // Validate remaining length matches signature count
+        uint256 expectedRemaining = signatureCount * ED25519_SIGNATURE_LENGTH;
+        if (offset + expectedRemaining != proof.length) revert CodecHelpers.InvalidProofLength();
+
+        return (roundBytes, signersBitmap, signatureCount);
     }
 
     /// @notice Deserialize a Finalization certificate
     /// @dev Identical structure to Notarization
     function deserializeFinalization(bytes calldata proof, uint32 maxSigners)
-        public pure returns (Finalization memory finalization)
+        public pure returns (
+            bytes calldata proposalBytes,
+            bytes memory signersBitmap,
+            uint32 signatureCount
+        )
     {
-        Notarization memory notarization = deserializeNotarization(proof, maxSigners);
-        finalization.proposal = notarization.proposal;
-        finalization.certificate = notarization.certificate;
-        return finalization;
+        return deserializeNotarization(proof, maxSigners);
     }
 
 
+    // ============ Fraud Proof Deserialization ============
+
     /// @notice Deserialize ConflictingNotarize proof
-    /// @dev Rust: pub struct ConflictingNotarize<S, D> { first: Notarize, second: Notarize }
+    /// @dev Rust: pub struct ConflictingNotarize<S, D> { notarize_1, notarize_2 }
     /// @dev Proves a validator signed two different proposals at the same round
+    /// @param proof The serialized proof bytes
+    /// @return proposalBytes1 First proposal bytes for verification
+    /// @return signer1 First signer index
+    /// @return signature1 First signature bytes
+    /// @return proposalBytes2 Second proposal bytes for verification
+    /// @return signer2 Second signer index (should equal signer1)
+    /// @return signature2 Second signature bytes
     function deserializeConflictingNotarize(bytes calldata proof)
         public pure returns (
-            Proposal memory proposal1,
-            Vote memory vote1,
-            Proposal memory proposal2,
-            Vote memory vote2
+            bytes calldata proposalBytes1,
+            uint32 signer1,
+            bytes calldata signature1,
+            bytes calldata proposalBytes2,
+            uint32 signer2,
+            bytes calldata signature2
         )
     {
         uint256 offset = 0;
 
         // Deserialize first Notarize
-        (proposal1, offset) = deserializeProposal(proof, offset);
-        (vote1, offset) = deserializeVote(proof, offset);
+        (proposalBytes1, offset) = extractProposalBytes(proof, offset);
+
+        if (offset + 4 > proof.length) revert CodecHelpers.InvalidProofLength();
+        signer1 = uint32(bytes4(proof[offset:offset+4]));
+        offset += 4;
+
+        if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert CodecHelpers.InvalidProofLength();
+        signature1 = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+        offset += ED25519_SIGNATURE_LENGTH;
 
         // Deserialize second Notarize
-        (proposal2, offset) = deserializeProposal(proof, offset);
-        (vote2, offset) = deserializeVote(proof, offset);
+        (proposalBytes2, offset) = extractProposalBytes(proof, offset);
 
-        if (offset != proof.length) revert InvalidProofLength();
+        if (offset + 4 > proof.length) revert CodecHelpers.InvalidProofLength();
+        signer2 = uint32(bytes4(proof[offset:offset+4]));
+        offset += 4;
+
+        if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert CodecHelpers.InvalidProofLength();
+        signature2 = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+        offset += ED25519_SIGNATURE_LENGTH;
+
+        if (offset != proof.length) revert CodecHelpers.InvalidProofLength();
 
         // Validate Byzantine behavior: same round, same signer, different proposals
-        validateRoundsMatch(proposal1.round, proposal2.round);
-        if (vote1.signer != vote2.signer) revert Conflicting_SignerMismatch();
-        validateProposalsDiffer(proposal1, proposal2);
+        bytes calldata round1 = proposalBytes1[0:16];
+        bytes calldata round2 = proposalBytes2[0:16];
+        validateRoundsMatch(round1, round2);
+        if (signer1 != signer2) revert Conflicting_SignerMismatch();
+        validateProposalsDiffer(proposalBytes1, proposalBytes2);
 
-        return (proposal1, vote1, proposal2, vote2);
+        return (proposalBytes1, signer1, signature1, proposalBytes2, signer2, signature2);
     }
 
     /// @notice Deserialize ConflictingFinalize proof
-    /// @dev Rust: pub struct ConflictingFinalize<S, D> { first: Finalize, second: Finalize }
-    /// @dev Identical to ConflictingNotarize but for Finalize.
+    /// @dev Identical structure to ConflictingNotarize
     function deserializeConflictingFinalize(bytes calldata proof)
         public pure returns (
-            Proposal memory proposal1,
-            Vote memory vote1,
-            Proposal memory proposal2,
-            Vote memory vote2
+            bytes calldata proposalBytes1,
+            uint32 signer1,
+            bytes calldata signature1,
+            bytes calldata proposalBytes2,
+            uint32 signer2,
+            bytes calldata signature2
         )
     {
         return deserializeConflictingNotarize(proof);
@@ -316,34 +257,412 @@ contract SimplexVerifierEd25519 is SimplexVerifierBase {
 
     /// @notice Deserialize NullifyFinalize proof
     /// @dev Rust: pub struct NullifyFinalize<S, D> { nullify: Nullify<S>, finalize: Finalize<S, D> }
-    /// @dev Write impl (consensus/src/simplex/types.rs:2281-2285):
-    ///      self.nullify.write(writer);   // Nullify
-    ///      self.finalize.write(writer);  // Finalize
     /// @dev Proves a validator voted both to skip AND finalize the same round
+    /// @param proof The serialized proof bytes
+    /// @return nullifyRoundBytes Nullify round bytes for verification
+    /// @return nullifySigner Nullify signer index
+    /// @return nullifySignature Nullify signature bytes
+    /// @return finalizeProposalBytes Finalize proposal bytes for verification
+    /// @return finalizeSigner Finalize signer index (should equal nullifySigner)
+    /// @return finalizeSignature Finalize signature bytes
     function deserializeNullifyFinalize(bytes calldata proof)
         public pure returns (
-            Round memory nullifyRound,
-            Vote memory nullifyVote,
-            Proposal memory finalizeProposal,
-            Vote memory finalizeVote
+            bytes calldata nullifyRoundBytes,
+            uint32 nullifySigner,
+            bytes calldata nullifySignature,
+            bytes calldata finalizeProposalBytes,
+            uint32 finalizeSigner,
+            bytes calldata finalizeSignature
         )
     {
         uint256 offset = 0;
 
         // Deserialize Nullify
-        (nullifyRound, offset) = deserializeRound(proof, offset);
-        (nullifyVote, offset) = deserializeVote(proof, offset);
+        (nullifyRoundBytes, offset) = extractRoundBytes(proof, offset);
+
+        if (offset + 4 > proof.length) revert CodecHelpers.InvalidProofLength();
+        nullifySigner = uint32(bytes4(proof[offset:offset+4]));
+        offset += 4;
+
+        if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert CodecHelpers.InvalidProofLength();
+        nullifySignature = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+        offset += ED25519_SIGNATURE_LENGTH;
 
         // Deserialize Finalize
-        (finalizeProposal, offset) = deserializeProposal(proof, offset);
-        (finalizeVote, offset) = deserializeVote(proof, offset);
+        (finalizeProposalBytes, offset) = extractProposalBytes(proof, offset);
 
-        if (offset != proof.length) revert InvalidProofLength();
+        if (offset + 4 > proof.length) revert CodecHelpers.InvalidProofLength();
+        finalizeSigner = uint32(bytes4(proof[offset:offset+4]));
+        offset += 4;
+
+        if (offset + ED25519_SIGNATURE_LENGTH > proof.length) revert CodecHelpers.InvalidProofLength();
+        finalizeSignature = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+        offset += ED25519_SIGNATURE_LENGTH;
+
+        if (offset != proof.length) revert CodecHelpers.InvalidProofLength();
 
         // Validate Byzantine behavior: same round, same signer
-        validateRoundsMatch(nullifyRound, finalizeProposal.round);
-        if (nullifyVote.signer != finalizeVote.signer) revert Conflicting_SignerMismatch();
+        bytes calldata finalizeRoundBytes = finalizeProposalBytes[0:16];
+        validateRoundsMatch(nullifyRoundBytes, finalizeRoundBytes);
+        if (nullifySigner != finalizeSigner) revert Conflicting_SignerMismatch();
 
-        return (nullifyRound, nullifyVote, finalizeProposal, finalizeVote);
+        return (nullifyRoundBytes, nullifySigner, nullifySignature, finalizeProposalBytes, finalizeSigner, finalizeSignature);
+    }
+
+    // ============ Verification Functions ============
+
+    /// @notice Verify a Notarize vote (individual signature)
+    /// @dev Constructs the signed message using union_unique format and verifies the signature
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proposalBytes The proposal bytes from deserialization
+    /// @param signer The signer index
+    /// @param signature The Ed25519 signature bytes
+    /// @param publicKey The signer's Ed25519 public key (32 bytes)
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if the signature is valid, false otherwise
+    function verifyNotarize(
+        bytes memory namespace,
+        bytes calldata proposalBytes,
+        uint32 signer,
+        bytes calldata signature,
+        bytes32 publicKey,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        // Construct the signed message: varint(len) + "namespace_NOTARIZE" + proposal_bytes
+        bytes memory namespaceWithSuffix = abi.encodePacked(namespace, "_NOTARIZE");
+        bytes memory signedMessage = encodeSignedMessage(namespaceWithSuffix, proposalBytes);
+
+        // Hash the signed message using the specified hash function
+        bytes32 messageHash = hashMessage(signedMessage, hashFunc);
+
+        // Verify the Ed25519 signature
+        return _verifyEd25519(messageHash, publicKey, signature);
+    }
+
+    /// @notice Verify a Nullify vote (individual signature)
+    /// @dev Constructs the signed message using union_unique format and verifies the signature
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param roundBytes The round bytes from deserialization (16 bytes)
+    /// @param signer The signer index
+    /// @param signature The Ed25519 signature bytes
+    /// @param publicKey The signer's Ed25519 public key (32 bytes)
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if the signature is valid, false otherwise
+    function verifyNullify(
+        bytes memory namespace,
+        bytes calldata roundBytes,
+        uint32 signer,
+        bytes calldata signature,
+        bytes32 publicKey,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        // Construct the signed message: varint(len) + "namespace_NULLIFY" + round_bytes
+        bytes memory namespaceWithSuffix = abi.encodePacked(namespace, "_NULLIFY");
+        bytes memory signedMessage = encodeSignedMessage(namespaceWithSuffix, roundBytes);
+
+        // Hash the signed message using the specified hash function
+        bytes32 messageHash = hashMessage(signedMessage, hashFunc);
+
+        // Verify the Ed25519 signature
+        return _verifyEd25519(messageHash, publicKey, signature);
+    }
+
+    /// @notice Verify a Finalize vote (individual signature)
+    /// @dev Identical to verifyNotarize (same message format)
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proposalBytes The proposal bytes from deserialization
+    /// @param signer The signer index
+    /// @param signature The Ed25519 signature bytes
+    /// @param publicKey The signer's Ed25519 public key (32 bytes)
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if the signature is valid, false otherwise
+    function verifyFinalize(
+        bytes memory namespace,
+        bytes calldata proposalBytes,
+        uint32 signer,
+        bytes calldata signature,
+        bytes32 publicKey,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        // Construct the signed message: varint(len) + "namespace_FINALIZE" + proposal_bytes
+        bytes memory namespaceWithSuffix = abi.encodePacked(namespace, "_FINALIZE");
+        bytes memory signedMessage = encodeSignedMessage(namespaceWithSuffix, proposalBytes);
+
+        // Hash the signed message using the specified hash function
+        bytes32 messageHash = hashMessage(signedMessage, hashFunc);
+
+        // Verify the Ed25519 signature
+        return _verifyEd25519(messageHash, publicKey, signature);
+    }
+
+    /// @notice Verify a Notarization certificate (batch signature verification)
+    /// @dev Verifies all signatures in the certificate and checks quorum requirements
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proof The complete proof bytes (contains proposal + certificate)
+    /// @param maxSigners Maximum allowed signers (for DoS protection)
+    /// @param quorum Required quorum percentage (e.g., 67 for 67%)
+    /// @param publicKeys All validator public keys (indexed by signer)
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if the certificate is valid, false otherwise
+    function verifyNotarization(
+        bytes memory namespace,
+        bytes calldata proof,
+        uint32 maxSigners,
+        uint32 quorum,
+        bytes32[] memory publicKeys,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        // Deserialize the notarization
+        (bytes calldata proposalBytes, bytes memory signersBitmap, uint32 signatureCount) =
+            deserializeNotarization(proof, maxSigners);
+
+        // Validate quorum: signatureCount >= (publicKeys.length * quorum + 99) / 100
+        uint32 requiredSigners = uint32((uint256(publicKeys.length) * quorum + 99) / 100);
+        if (signatureCount < requiredSigners) return false;
+
+        // Construct the signed message
+        bytes memory namespaceWithSuffix = abi.encodePacked(namespace, "_NOTARIZE");
+        bytes memory signedMessage = encodeSignedMessage(namespaceWithSuffix, proposalBytes);
+        bytes32 messageHash = hashMessage(signedMessage, hashFunc);
+
+        // Calculate offset to start of signatures
+        uint256 offset = proposalBytes.length;
+        // Skip bitmap (u64 length + bytes)
+        offset += 8; // bitmap length
+        uint256 bitmapByteLength = (signersBitmap.length);
+        offset += bitmapByteLength;
+        // Skip signature count varint
+        (, uint256 afterVarint) = CodecHelpers.decodeVarintU32(proof, offset);
+        offset = afterVarint;
+
+        // Verify each signature
+        uint32 sigIndex = 0;
+        for (uint32 i = 0; i < publicKeys.length && sigIndex < signatureCount; i++) {
+            if (CodecHelpers.getBit(signersBitmap, i)) {
+                bytes calldata sig = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+                if (!_verifyEd25519(messageHash, publicKeys[i], sig)) {
+                    return false;
+                }
+                offset += ED25519_SIGNATURE_LENGTH;
+                sigIndex++;
+            }
+        }
+
+        return sigIndex == signatureCount;
+    }
+
+    /// @notice Verify a Nullification certificate (batch signature verification)
+    /// @dev Verifies all signatures in the certificate and checks quorum requirements
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proof The complete proof bytes (contains round + certificate)
+    /// @param maxSigners Maximum allowed signers (for DoS protection)
+    /// @param quorum Required quorum percentage (e.g., 67 for 67%)
+    /// @param publicKeys All validator public keys (indexed by signer)
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if the certificate is valid, false otherwise
+    function verifyNullification(
+        bytes memory namespace,
+        bytes calldata proof,
+        uint32 maxSigners,
+        uint32 quorum,
+        bytes32[] memory publicKeys,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        // Deserialize the nullification
+        (bytes calldata roundBytes, bytes memory signersBitmap, uint32 signatureCount) =
+            deserializeNullification(proof, maxSigners);
+
+        // Validate quorum
+        uint32 requiredSigners = uint32((uint256(publicKeys.length) * quorum + 99) / 100);
+        if (signatureCount < requiredSigners) return false;
+
+        // Construct the signed message
+        bytes memory namespaceWithSuffix = abi.encodePacked(namespace, "_NULLIFY");
+        bytes memory signedMessage = encodeSignedMessage(namespaceWithSuffix, roundBytes);
+        bytes32 messageHash = hashMessage(signedMessage, hashFunc);
+
+        // Calculate offset to start of signatures
+        uint256 offset = roundBytes.length; // 16 bytes
+        // Skip bitmap
+        offset += 8;
+        offset += signersBitmap.length;
+        // Skip signature count varint
+        (, uint256 afterVarint) = CodecHelpers.decodeVarintU32(proof, offset);
+        offset = afterVarint;
+
+        // Verify each signature
+        uint32 sigIndex = 0;
+        for (uint32 i = 0; i < publicKeys.length && sigIndex < signatureCount; i++) {
+            if (CodecHelpers.getBit(signersBitmap, i)) {
+                bytes calldata sig = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+                if (!_verifyEd25519(messageHash, publicKeys[i], sig)) {
+                    return false;
+                }
+                offset += ED25519_SIGNATURE_LENGTH;
+                sigIndex++;
+            }
+        }
+
+        return sigIndex == signatureCount;
+    }
+
+    /// @notice Verify a Finalization certificate (batch signature verification)
+    /// @dev Identical to verifyNotarization (same message format with _FINALIZE suffix)
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proof The complete proof bytes (contains proposal + certificate)
+    /// @param maxSigners Maximum allowed signers (for DoS protection)
+    /// @param quorum Required quorum percentage (e.g., 67 for 67%)
+    /// @param publicKeys All validator public keys (indexed by signer)
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if the certificate is valid, false otherwise
+    function verifyFinalization(
+        bytes memory namespace,
+        bytes calldata proof,
+        uint32 maxSigners,
+        uint32 quorum,
+        bytes32[] memory publicKeys,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        // Deserialize the finalization
+        (bytes calldata proposalBytes, bytes memory signersBitmap, uint32 signatureCount) =
+            deserializeFinalization(proof, maxSigners);
+
+        // Validate quorum
+        uint32 requiredSigners = uint32((uint256(publicKeys.length) * quorum + 99) / 100);
+        if (signatureCount < requiredSigners) return false;
+
+        // Construct the signed message (note: _FINALIZE suffix, not _NOTARIZE)
+        bytes memory namespaceWithSuffix = abi.encodePacked(namespace, "_FINALIZE");
+        bytes memory signedMessage = encodeSignedMessage(namespaceWithSuffix, proposalBytes);
+        bytes32 messageHash = hashMessage(signedMessage, hashFunc);
+
+        // Calculate offset to start of signatures
+        uint256 offset = proposalBytes.length;
+        offset += 8;
+        offset += signersBitmap.length;
+        (, uint256 afterVarint) = CodecHelpers.decodeVarintU32(proof, offset);
+        offset = afterVarint;
+
+        // Verify each signature
+        uint32 sigIndex = 0;
+        for (uint32 i = 0; i < publicKeys.length && sigIndex < signatureCount; i++) {
+            if (CodecHelpers.getBit(signersBitmap, i)) {
+                bytes calldata sig = proof[offset:offset+ED25519_SIGNATURE_LENGTH];
+                if (!_verifyEd25519(messageHash, publicKeys[i], sig)) {
+                    return false;
+                }
+                offset += ED25519_SIGNATURE_LENGTH;
+                sigIndex++;
+            }
+        }
+
+        return sigIndex == signatureCount;
+    }
+
+    /// @notice Verify a ConflictingNotarize fraud proof
+    /// @dev Verifies BOTH notarize signatures to prove Byzantine behavior
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proof The complete proof bytes
+    /// @param publicKey The Byzantine validator's public key
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if both signatures are valid (proving the conflict), false otherwise
+    function verifyConflictingNotarize(
+        bytes memory namespace,
+        bytes calldata proof,
+        bytes32 publicKey,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        (
+            bytes calldata proposalBytes1,
+            uint32 signer1,
+            bytes calldata signature1,
+            bytes calldata proposalBytes2,
+            uint32 signer2,
+            bytes calldata signature2
+        ) = deserializeConflictingNotarize(proof);
+
+        // Verify both notarize signatures
+        bool valid1 = verifyNotarize(namespace, proposalBytes1, signer1, signature1, publicKey, hashFunc);
+        bool valid2 = verifyNotarize(namespace, proposalBytes2, signer2, signature2, publicKey, hashFunc);
+
+        return valid1 && valid2;
+    }
+
+    /// @notice Verify a ConflictingFinalize fraud proof
+    /// @dev Verifies BOTH finalize signatures to prove Byzantine behavior
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proof The complete proof bytes
+    /// @param publicKey The Byzantine validator's public key
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if both signatures are valid (proving the conflict), false otherwise
+    function verifyConflictingFinalize(
+        bytes memory namespace,
+        bytes calldata proof,
+        bytes32 publicKey,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        (
+            bytes calldata proposalBytes1,
+            uint32 signer1,
+            bytes calldata signature1,
+            bytes calldata proposalBytes2,
+            uint32 signer2,
+            bytes calldata signature2
+        ) = deserializeConflictingFinalize(proof);
+
+        // Verify both finalize signatures
+        bool valid1 = verifyFinalize(namespace, proposalBytes1, signer1, signature1, publicKey, hashFunc);
+        bool valid2 = verifyFinalize(namespace, proposalBytes2, signer2, signature2, publicKey, hashFunc);
+
+        return valid1 && valid2;
+    }
+
+    /// @notice Verify a NullifyFinalize fraud proof
+    /// @dev Verifies BOTH nullify and finalize signatures to prove Byzantine behavior
+    /// @param namespace The application namespace (e.g., "MyApp")
+    /// @param proof The complete proof bytes
+    /// @param publicKey The Byzantine validator's public key
+    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
+    /// @return true if both signatures are valid (proving the conflict), false otherwise
+    function verifyNullifyFinalize(
+        bytes memory namespace,
+        bytes calldata proof,
+        bytes32 publicKey,
+        HashFunction hashFunc
+    ) public pure returns (bool) {
+        (
+            bytes calldata nullifyRoundBytes,
+            uint32 nullifySigner,
+            bytes calldata nullifySignature,
+            bytes calldata finalizeProposalBytes,
+            uint32 finalizeSigner,
+            bytes calldata finalizeSignature
+        ) = deserializeNullifyFinalize(proof);
+
+        // Verify both signatures
+        bool validNullify = verifyNullify(namespace, nullifyRoundBytes, nullifySigner, nullifySignature, publicKey, hashFunc);
+        bool validFinalize = verifyFinalize(namespace, finalizeProposalBytes, finalizeSigner, finalizeSignature, publicKey, hashFunc);
+
+        return validNullify && validFinalize;
+    }
+
+    // ============ Internal Helpers ============
+
+    /// @notice Verify Ed25519 signature
+    /// @dev To be implemented with precompile or library
+    /// @param messageHash The hash of the message (32 bytes)
+    /// @param publicKey The Ed25519 public key (32 bytes)
+    /// @param signature The Ed25519 signature (64 bytes)
+    /// @return true if signature is valid, false otherwise
+    function _verifyEd25519(
+        bytes32 messageHash,
+        bytes32 publicKey,
+        bytes calldata signature
+    ) internal pure returns (bool) {
+        if (signature.length != ED25519_SIGNATURE_LENGTH) return false;
+
+        // TODO: Implement Ed25519 verification using precompile or library
+        // Placeholder: always return true for now (NOT FOR PRODUCTION!)
+        return true;
     }
 }
