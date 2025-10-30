@@ -30,3 +30,7 @@ criterion = { workspace = true }
 
 [lib]
 bench = false
+
+[[bench]]
+name = "framing_comparison"
+harness = false
