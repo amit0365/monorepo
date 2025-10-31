@@ -1,68 +1,40 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IAggregatedScheme, BLS2, HashFunction} from "../interfaces/ISignatureScheme.sol";
+import {ISignatureScheme} from "../interfaces/ISignatureScheme.sol";
+import {BLS2} from "../libraries/BLS2Extensions.sol";
 import {CodecHelpers} from "../libraries/CodecHelpers.sol";
 
 /// @title BLSMultisigScheme
 /// @notice BLS12-381 multisig scheme implementation (aggregated signatures)
-/// @dev Implements IAggregatedScheme for BLS signature aggregation
-/// @dev This scheme owns and manages BLS public keys for all validators
-/// @dev Certificates contain single aggregated signature + bitmap of signers
+/// @dev Implements ISignatureScheme for BLS signature aggregation
+/// @dev This scheme manages BLS public keys for all validators
+/// @dev Signature format: bitmap (variable length) || aggregated_signature (48 bytes)
+/// @dev publicKey parameter contains all validator public keys concatenated
 /// @dev Uses MinPk variant: Public keys in G2 (96 bytes), Signatures in G1 (48 bytes)
-contract BLSMultisigScheme is IAggregatedScheme {
+contract BLSMultisigScheme is ISignatureScheme {
     // ============ Constants ============
 
+    uint256 constant BLS_PUBLIC_KEY_LENGTH = 96; // G2 for MinPk variant
     uint256 constant BLS_SIGNATURE_LENGTH = 48; // G1 for MinPk variant
 
     // ============ Errors ============
 
-    error InvalidSignerIndex();
-    error EmptyPublicKeys();
-    error UnknownHashFunction();
     error NoSignersInBitmap();
 
     // ============ State ============
 
-    /// @notice BLS public keys for all validators (G2 points, 96 bytes each)
-    BLS2.PointG2[] public publicKeys;
-
-    /// @notice Hash function used by this scheme instance
-    HashFunction public immutable hashFunction;
-
     /// @notice Domain separation tag for hash-to-curve
     /// @dev Format: {application}-BLS12381G1_XMD:SHA-256_SSWU_RO_{chainid}_
-    bytes public DST;
+    bytes public immutable DST;
 
     // ============ Constructor ============
 
     /// @notice Initialize the BLS multisig scheme
-    /// @param publicKeyBytes Array of serialized BLS G2 public keys (96 bytes each)
-    /// @param _hashFunction Hash function to use for message hashing
     /// @param application Application name for domain separation tag
-    constructor(
-        bytes[] memory publicKeyBytes,
-        HashFunction _hashFunction,
-        string memory application
-    ) {
-        if (publicKeyBytes.length == 0) revert EmptyPublicKeys();
-
-        publicKeys = new BLS2.PointG2[](publicKeyBytes.length);
-        for (uint256 i = 0; i < publicKeyBytes.length; i++) {
-            publicKeys[i] = BLS2.g2Unmarshal(publicKeyBytes[i]);
-        }
-
-        hashFunction = _hashFunction;
-
-        // Build domain separation tag based on hash function
-        string memory hashSpec;
-        if (_hashFunction == HashFunction.SHA256) {
-            hashSpec = "-BLS12381G1_XMD:SHA-256_SSWU_RO_";
-        } else if (_hashFunction == HashFunction.KECCAK256) {
-            hashSpec = "-BLS12381G1_XMD:KECCAK-256_SSWU_RO_";
-        } else {
-            revert UnknownHashFunction();
-        }
+    constructor(string memory application) {
+        // Build domain separation tag
+        string memory hashSpec = "-BLS12381G1_XMD:SHA-256_SSWU_RO_";
 
         DST = abi.encodePacked(
             application,
@@ -74,74 +46,89 @@ contract BLSMultisigScheme is IAggregatedScheme {
 
     // ============ Interface Implementation ============
 
-    /// @inheritdoc IAggregatedScheme
+    /// @inheritdoc ISignatureScheme
     function SCHEME_ID() external pure returns (string memory) {
         return "BLS12381_MULTISIG";
     }
 
-    /// @inheritdoc IAggregatedScheme
-    function HASH_FUNCTION() external view returns (HashFunction) {
-        return hashFunction;
+    /// @inheritdoc ISignatureScheme
+    /// @notice For multisig, this returns the length of a single public key
+    /// @dev The publicKey parameter in verifySignature contains N concatenated keys
+    function PUBLIC_KEY_LENGTH() external pure returns (uint256) {
+        return BLS_PUBLIC_KEY_LENGTH;
     }
 
-    /// @inheritdoc IAggregatedScheme
-    function getPublicKey(uint32 signerIndex) external view returns (bytes memory) {
-        if (signerIndex >= publicKeys.length) revert InvalidSignerIndex();
-        return BLS2.g2Marshal(publicKeys[signerIndex]);
+    /// @inheritdoc ISignatureScheme
+    /// @notice For multisig, this returns the base signature length (not including bitmap)
+    /// @dev The actual signature includes: bitmap || 48-byte aggregated signature
+    function SIGNATURE_LENGTH() external pure returns (uint256) {
+        return BLS_SIGNATURE_LENGTH;
     }
 
-    /// @inheritdoc IAggregatedScheme
-    function participantCount() external view returns (uint32) {
-        return uint32(publicKeys.length);
-    }
-
-    /// @inheritdoc IAggregatedScheme
-    function hashAndVerify(
+    /// @inheritdoc ISignatureScheme
+    /// @notice Verify aggregated BLS multisig signature
+    /// @dev publicKey contains N concatenated 96-byte G2 public keys (total: N * 96 bytes)
+    /// @dev signature format: bitmap (ceil(N/8) bytes) || aggregated_sig (48 bytes)
+    /// @param message The raw message bytes that was signed
+    /// @param publicKey Concatenated public keys of all N validators (N * 96 bytes)
+    /// @param signature Bitmap concatenated with aggregated signature
+    /// @return true if signature is valid, false otherwise
+    function verifySignature(
         bytes calldata message,
-        bytes calldata signersBitmap,
+        bytes calldata publicKey,
         bytes calldata signature
     ) external view returns (bool) {
-        // Hash message to BLS point on G1 using hash-to-curve
-        // Note: BLS2.hashToPoint takes raw message bytes, not pre-hashed
+        // Validate publicKey is a multiple of BLS_PUBLIC_KEY_LENGTH
+        if (publicKey.length % BLS_PUBLIC_KEY_LENGTH != 0) return false;
+        if (publicKey.length == 0) return false;
+
+        uint256 numValidators = publicKey.length / BLS_PUBLIC_KEY_LENGTH;
+        uint256 bitmapLength = (numValidators + 7) / 8; // ceil(N/8)
+
+        // Validate signature format: bitmap || 48-byte sig
+        if (signature.length != bitmapLength + BLS_SIGNATURE_LENGTH) return false;
+
+        // Extract bitmap and aggregated signature
+        bytes calldata bitmap = signature[0:bitmapLength];
+        bytes calldata aggSig = signature[bitmapLength:signature.length];
+
+        // Hash message to BLS point on G1
         BLS2.PointG1 memory messagePoint = BLS2.hashToPoint(DST, message);
 
         // Aggregate public keys for signers in bitmap
-        BLS2.PointG2 memory aggregatedPubKey = _aggregatePublicKeys(signersBitmap);
+        BLS2.PointG2 memory aggregatedPubKey = _aggregatePublicKeysFromBytes(publicKey, bitmap, numValidators);
 
         // Verify aggregated signature using pairing
-        BLS2.PointG1 memory sig = BLS2.g1Unmarshal(signature);
+        BLS2.PointG1 memory sig = BLS2.g1Unmarshal(aggSig);
         return BLS2.pairing(messagePoint, aggregatedPubKey, sig);
     }
 
     // ============ Internal Helpers ============
-
-    /// @notice Hash data using the configured hash function
-    /// @param data Data to hash
-    /// @return Hash digest (32 bytes)
-    function _hash(bytes memory data) internal view returns (bytes32) {
-        if (hashFunction == HashFunction.SHA256) {
-            return sha256(data);
-        } else if (hashFunction == HashFunction.KECCAK256) {
-            return keccak256(data);
-        }
-        revert UnknownHashFunction();
-    }
-
-    /// @notice Aggregate public keys for signers indicated in bitmap
-    /// @param bitmap Bitmap of signers
+    /// TODO refactor this into simplex
+    /// @notice Aggregate public keys from concatenated bytes based on bitmap
+    /// @param publicKeyBytes Concatenated public keys (N * 96 bytes)
+    /// @param bitmap Bitmap indicating which keys to aggregate
+    /// @param numValidators Number of validators (N)
     /// @return result Aggregated G2 public key
-    function _aggregatePublicKeys(bytes memory bitmap)
-        internal view returns (BLS2.PointG2 memory result)
-    {
+    function _aggregatePublicKeysFromBytes(
+        bytes calldata publicKeyBytes,
+        bytes calldata bitmap,
+        uint256 numValidators
+    ) internal view returns (BLS2.PointG2 memory result) {
         bool first = true;
 
-        for (uint32 i = 0; i < publicKeys.length; i++) {
+        for (uint32 i = 0; i < numValidators; i++) {
             if (CodecHelpers.getBit(bitmap, i)) {
+                // Extract the i-th public key (96 bytes)
+                uint256 offset = i * BLS_PUBLIC_KEY_LENGTH;
+                bytes calldata pkBytes = publicKeyBytes[offset:offset + BLS_PUBLIC_KEY_LENGTH];
+                BLS2.PointG2 memory pk = BLS2.g2Unmarshal(pkBytes);
+
                 if (first) {
-                    result = publicKeys[i];
+                    result = pk;
                     first = false;
                 } else {
-                    result = BLS2.g2Add(result, publicKeys[i]);
+                    result = BLS2.g2Add(result, pk);
                 }
             }
         }

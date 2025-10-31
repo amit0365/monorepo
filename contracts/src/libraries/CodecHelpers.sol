@@ -210,4 +210,37 @@ library CodecHelpers {
 
         return (bitmapLengthInBits, signersBitmap, offset);
     }
+
+    // ============ Attributable Scheme Helpers ============
+
+    /// @notice Deserialize signer + signature from individual vote (attributable schemes)
+    /// @dev Common logic for attributable schemes (Ed25519, BLS Multisig, etc.)
+    /// @dev Format: signer (4 bytes big-endian) + signature (signatureLength bytes)
+    /// @param proof The serialized proof bytes
+    /// @param offset Starting offset
+    /// @param signatureLength Length of the signature in bytes (64 for Ed25519, 96 for BLS)
+    /// @return signer The signer index
+    /// @return signature The signature bytes
+    /// @return newOffset Updated offset after reading
+    function deserializeSignerAndSignature(
+        bytes calldata proof,
+        uint256 offset,
+        uint256 signatureLength
+    ) internal pure returns (
+        uint32 signer,
+        bytes calldata signature,
+        uint256 newOffset
+    ) {
+        // Read signer: 4 bytes big-endian
+        if (offset + 4 > proof.length) revert InvalidProofLength();
+        signer = uint32(bytes4(proof[offset:offset+4]));
+        offset += 4;
+
+        // Read signature: signatureLength bytes
+        if (offset + signatureLength > proof.length) revert InvalidProofLength();
+        signature = proof[offset:offset+signatureLength];
+        offset += signatureLength;
+
+        return (signer, signature, offset);
+    }
 }

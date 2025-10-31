@@ -2,7 +2,14 @@
 pragma solidity ^0.8.24;
 
 import {CodecHelpers} from "./libraries/CodecHelpers.sol";
-import {HashFunction} from "./interfaces/ISignatureScheme.sol";
+
+/// @notice Digest length variants for application-level payload hashing
+/// @dev Determines the payload size in Proposal<D> encoding
+/// @dev SHA256/KECCAK256 produce 32-byte digests, SHA512 produces 64-byte digests
+enum DigestLength {
+    DIGEST_32,  // SHA256, KECCAK256 (32 bytes)
+    DIGEST_64   // SHA512 (64 bytes)
+}
 
 /// @title SimplexVerifierBase
 /// @notice Abstract base contract for Simplex consensus proof verification
@@ -11,7 +18,8 @@ import {HashFunction} from "./interfaces/ISignatureScheme.sol";
 abstract contract SimplexVerifierBase {
     // ============ Constants ============
 
-    uint256 internal constant DIGEST_LENGTH = 32;
+    uint256 internal constant DIGEST_LENGTH_32 = 32;
+    uint256 internal constant DIGEST_LENGTH_64 = 64;
 
     // ============ Errors ============
 
@@ -19,7 +27,6 @@ abstract contract SimplexVerifierBase {
     error Conflicting_ViewMismatch();
     error Conflicting_SignerMismatch();
     error Conflicting_ProposalsMustDiffer();
-    error UnsupportedHashFunction();
 
     // ============ Deserialization Helpers ============
 
@@ -38,13 +45,14 @@ abstract contract SimplexVerifierBase {
     }
 
     /// @notice Extract proposal bytes from proof
-    /// @dev Proposal format: round (16 bytes) + parent (varint) + payload (32 bytes)
+    /// @dev Proposal format: round (16 bytes) + parent (varint) + payload (digest length)
     /// @dev Rust: consensus/src/simplex/types.rs:812-817
     /// @param data The proof calldata
     /// @param offset Starting position
+    /// @param digestLength Length of the payload digest (32 or 64 bytes)
     /// @return proposalBytes The raw proposal bytes
     /// @return newOffset Updated offset after reading
-    function extractProposalBytes(bytes calldata data, uint256 offset)
+    function extractProposalBytes(bytes calldata data, uint256 offset, DigestLength digestLength)
         internal pure returns (bytes calldata proposalBytes, uint256 newOffset)
     {
         uint256 startOffset = offset;
@@ -55,9 +63,10 @@ abstract contract SimplexVerifierBase {
         // Skip parent varint
         (, offset) = CodecHelpers.decodeVarintU64(data, offset);
 
-        // Skip payload (32 bytes)
-        if (offset + DIGEST_LENGTH > data.length) revert CodecHelpers.InvalidProofLength();
-        offset += DIGEST_LENGTH;
+        // Skip payload (digest length dependent)
+        uint256 payloadLength = digestLength == DigestLength.DIGEST_32 ? DIGEST_LENGTH_32 : DIGEST_LENGTH_64;
+        if (offset + payloadLength > data.length) revert CodecHelpers.InvalidProofLength();
+        offset += payloadLength;
 
         return (data[startOffset:offset], offset);
     }
@@ -106,23 +115,6 @@ abstract contract SimplexVerifierBase {
 
         // Combine: varint(len) + namespace + message
         return abi.encodePacked(lengthVarint, namespaceWithSuffix, messageBytes);
-    }
-
-    /// @notice Hash a message using the specified hash function
-    /// @dev Dispatches to the appropriate hash function based on the scheme's configuration
-    /// @param message The message bytes to hash
-    /// @param hashFunc The hash function to use (SHA256 or KECCAK256)
-    /// @return The 32-byte hash digest
-    function hashMessage(bytes memory message, HashFunction hashFunc)
-        internal pure returns (bytes32)
-    {
-        if (hashFunc == HashFunction.SHA256) {
-            return sha256(message);
-        } else if (hashFunc == HashFunction.KECCAK256) {
-            return keccak256(message);
-        } else {
-            revert UnsupportedHashFunction();
-        }
     }
 
     // ============ Validation Helpers ============

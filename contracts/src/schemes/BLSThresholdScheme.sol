@@ -1,69 +1,35 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IThresholdScheme, BLS2, HashFunction} from "../interfaces/ISignatureScheme.sol";
+import {ISignatureScheme} from "../interfaces/ISignatureScheme.sol";
+import {BLS2} from "../libraries/BLS2Extensions.sol";
 
 /// @title BLSThresholdScheme
 /// @notice BLS12-381 threshold signature scheme implementation
-/// @dev Implements IThresholdScheme for threshold BLS signatures
+/// @dev Implements ISignatureScheme for threshold BLS signatures
 /// @dev This scheme uses a single threshold public key shared by all participants
-/// @dev Certificates contain only the recovered aggregate signature (no signer info)
+/// @dev The threshold public key is passed as the publicKey parameter in verifySignature
 /// @dev WARNING: Individual signatures are NOT attributable (threshold allows forgery)
 /// @dev Uses MinSig variant: Threshold key in G2 (96 bytes), Signatures in G1 (48 bytes)
-contract BLSThresholdScheme is IThresholdScheme {
+contract BLSThresholdScheme is ISignatureScheme {
     // ============ Constants ============
 
+    uint256 constant BLS_PUBLIC_KEY_LENGTH = 96; // G2 for MinSig variant
     uint256 constant BLS_SIGNATURE_LENGTH = 48; // G1 for MinSig variant
-
-    // ============ Errors ============
-
-    error EmptyParticipants();
-    error UnknownHashFunction();
 
     // ============ State ============
 
-    /// @notice Single threshold public key (G2 point, 96 bytes)
-    /// @dev All participants share this key via distributed key generation
-    BLS2.PointG2 public thresholdPublicKey;
-
-    /// @notice Total number of participants in the threshold setup
-    uint32 public immutable n;
-
-    /// @notice Hash function used by this scheme instance
-    HashFunction public immutable hashFunction;
-
     /// @notice Domain separation tag for hash-to-curve
     /// @dev Format: {application}-BLS12381G1_XMD:SHA-256_SSWU_RO_{chainid}_
-    bytes public DST;
+    bytes public immutable DST;
 
     // ============ Constructor ============
 
     /// @notice Initialize the BLS threshold scheme
-    /// @param thresholdKeyBytes Serialized BLS G2 threshold public key (96 bytes)
-    /// @param _n Total number of participants
-    /// @param _hashFunction Hash function to use for message hashing
     /// @param application Application name for domain separation tag
-    constructor(
-        bytes memory thresholdKeyBytes,
-        uint32 _n,
-        HashFunction _hashFunction,
-        string memory application
-    ) {
-        if (_n == 0) revert EmptyParticipants();
-
-        thresholdPublicKey = BLS2.g2Unmarshal(thresholdKeyBytes);
-        n = _n;
-        hashFunction = _hashFunction;
-
+    constructor(string memory application) {
         // Build domain separation tag based on hash function
-        string memory hashSpec;
-        if (_hashFunction == HashFunction.SHA256) {
-            hashSpec = "-BLS12381G1_XMD:SHA-256_SSWU_RO_";
-        } else if (_hashFunction == HashFunction.KECCAK256) {
-            hashSpec = "-BLS12381G1_XMD:KECCAK-256_SSWU_RO_";
-        } else {
-            revert UnknownHashFunction();
-        }
+        string memory hashSpec = "-BLS12381G1_XMD:SHA-256_SSWU_RO_";
 
         DST = abi.encodePacked(
             application,
@@ -75,38 +41,47 @@ contract BLSThresholdScheme is IThresholdScheme {
 
     // ============ Interface Implementation ============
 
-    /// @inheritdoc IThresholdScheme
+    /// @inheritdoc ISignatureScheme
     function SCHEME_ID() external pure returns (string memory) {
         return "BLS12381_THRESHOLD";
     }
 
-    /// @inheritdoc IThresholdScheme
-    function HASH_FUNCTION() external view returns (HashFunction) {
-        return hashFunction;
+    /// @inheritdoc ISignatureScheme
+    function PUBLIC_KEY_LENGTH() external pure returns (uint256) {
+        return BLS_PUBLIC_KEY_LENGTH;
     }
 
-    /// @inheritdoc IThresholdScheme
-    function getThresholdPublicKey() external view returns (bytes memory) {
-        return BLS2.g2Marshal(thresholdPublicKey);
+    /// @inheritdoc ISignatureScheme
+    function SIGNATURE_LENGTH() external pure returns (uint256) {
+        return BLS_SIGNATURE_LENGTH;
     }
 
-    /// @inheritdoc IThresholdScheme
-    function participantCount() external view returns (uint32) {
-        return n;
-    }
-
-    /// @inheritdoc IThresholdScheme
-    function hashAndVerify(
+    /// @inheritdoc ISignatureScheme
+    /// @notice Verify threshold BLS signature
+    /// @dev The publicKey parameter should be the threshold public key (96 bytes)
+    /// @dev This allows the verifier to be stateless and work with any threshold setup
+    /// @param message The raw message bytes that was signed
+    /// @param publicKey The threshold public key (96 bytes G2 point)
+    /// @param signature The threshold BLS signature (48 bytes G1 point)
+    /// @return true if signature is valid, false otherwise
+    function verifySignature(
         bytes calldata message,
+        bytes calldata publicKey,
         bytes calldata signature
     ) external view returns (bool) {
-        // Hash to BLS point on G1 using BLS2.hashToPoint
-        // Note: BLS2.hashToPoint internally uses the hash function from DST
+        // Validate lengths
+        if (publicKey.length != BLS_PUBLIC_KEY_LENGTH) return false;
+        if (signature.length != BLS_SIGNATURE_LENGTH) return false;
+
+        // Unmarshal public key and signature
+        BLS2.PointG2 memory thresholdKey = BLS2.g2Unmarshal(publicKey);
+        BLS2.PointG1 memory sig = BLS2.g1Unmarshal(signature);
+
+        // Hash message to BLS point on G1
         BLS2.PointG1 memory messagePoint = BLS2.hashToPoint(DST, message);
 
-        // Verify threshold signature against threshold public key
-        BLS2.PointG1 memory sig = BLS2.g1Unmarshal(signature);
-        (bool pairingSuccess, bool callSuccess) = BLS2.verifySingle(sig, thresholdPublicKey, messagePoint);
+        // Verify threshold signature
+        (bool pairingSuccess, bool callSuccess) = BLS2.verifySingle(sig, thresholdKey, messagePoint);
         return pairingSuccess && callSuccess;
     }
 
