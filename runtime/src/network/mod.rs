@@ -4,6 +4,7 @@ pub(crate) mod metered;
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network")))]
 pub(crate) mod tokio;
+pub(crate) mod tokio_buffered;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "iouring-network"))]
 pub(crate) mod iouring;
