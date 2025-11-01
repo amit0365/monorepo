@@ -1,10 +1,10 @@
 // // SPDX-License-Identifier: MIT
 // pragma solidity ^0.8.24;
 
-// import {ISignatureScheme} from "../interfaces/ISignatureScheme.sol";
-// import {BLS2} from "../libraries/BLS2Extensions.sol";
+// import {ISignatureScheme} from "./interfaces/ISignatureScheme.sol";
+// import {BLS2} from "../crypto/bls12381/BLS2Extensions.sol";
 
-// /// @title BLSThresholdScheme
+    // /// @title BLSThresholdScheme
 // /// @notice BLS12-381 threshold signature scheme implementation
 // /// @dev Implements ISignatureScheme for threshold BLS signatures
 // /// @dev This scheme uses a single threshold public key shared by all participants

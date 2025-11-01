@@ -1,9 +1,9 @@
 // // SPDX-License-Identifier: MIT
 // pragma solidity ^0.8.24;
 
-// import {IMultisigScheme} from "../interfaces/IMultisigScheme.sol";
-// import {BLS2} from "../libraries/BLS2Extensions.sol";
-// import {CodecHelpers} from "../libraries/CodecHelpers.sol";
+// import {IMultisigScheme} from "./interfaces/IMultisigScheme.sol";
+// import {BLS2} from "../crypto/bls12381/BLS2Extensions.sol";
+// import {CodecHelpers} from "../lib/CodecHelpers.sol";
 
 // /// @title BLSMultisigMinSigScheme
 // /// @notice BLS12-381 multisig scheme implementation (aggregated signatures)
