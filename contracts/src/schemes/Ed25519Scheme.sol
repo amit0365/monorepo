@@ -44,7 +44,7 @@ contract Ed25519Scheme is ISignatureScheme {
         bytes calldata message,
         bytes calldata publicKey,
         bytes calldata signature
-    ) external view returns (bool) {
+    ) external pure returns (bool) {
         // Validate lengths
         if (publicKey.length != ED25519_PUBLIC_KEY_LENGTH) return false;
         if (signature.length != ED25519_SIGNATURE_LENGTH) return false;

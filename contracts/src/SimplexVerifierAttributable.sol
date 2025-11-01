@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.19;
 
 import "./SimplexVerifierBase.sol";
 import {CodecHelpers} from "./libraries/CodecHelpers.sol";
@@ -15,19 +15,19 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
     /// @notice The signature scheme used for verification
     ISignatureScheme public immutable scheme;
 
-    /// @notice Digest length used by the application (32 for SHA256/KECCAK256, 64 for SHA512)
-    DigestLength public immutable DIGEST_LENGTH;
+    /// @notice Digest length in bytes (use DigestLengths constants)
+    uint256 public immutable digestLength;
 
     // ============ Constructor ============
 
     /// @param _scheme The signature scheme to use for verification
-    /// @param _digestLength Length of payload digests in proposals
+    /// @param _digestLength Length of payload digests in bytes (use DigestLengths.SHA256 or DigestLengths.BLAKE3)
     constructor(
         ISignatureScheme _scheme,
-        DigestLength _digestLength
+        uint256 _digestLength
     ) {
         scheme = _scheme;
-        DIGEST_LENGTH = _digestLength;
+        digestLength = _digestLength;
     }
 
     // ============ Scheme Properties ============
@@ -79,7 +79,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         )
     {
         uint256 offset;
-        (proposalBytes, offset) = extractProposalBytes(proof, 0, DIGEST_LENGTH);
+        (proposalBytes, offset) = extractProposalBytes(proof, 0, digestLength);
         (signer, signature, offset) = CodecHelpers.deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
         if (offset != proof.length) revert CodecHelpers.InvalidProofLength();
         return (proposalBytes, signer, signature);
@@ -199,7 +199,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         uint256 messageEndOffset;
 
         // Extract proposal bytes first
-        (proposalBytes, offset) = extractProposalBytes(proof, 0, DIGEST_LENGTH);
+        (proposalBytes, offset) = extractProposalBytes(proof, 0, digestLength);
         messageEndOffset = offset;
 
         // Deserialize bitmap and signature count
@@ -450,11 +450,11 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         uint256 offset = 0;
 
         // Deserialize first Notarize
-        (proposalBytes1, offset) = extractProposalBytes(proof, offset, DIGEST_LENGTH);
+        (proposalBytes1, offset) = extractProposalBytes(proof, offset, digestLength);
         (signer1, signature1, offset) = CodecHelpers.deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
 
         // Deserialize second Notarize
-        (proposalBytes2, offset) = extractProposalBytes(proof, offset, DIGEST_LENGTH);
+        (proposalBytes2, offset) = extractProposalBytes(proof, offset, digestLength);
         (signer2, signature2, offset) = CodecHelpers.deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
 
         if (offset != proof.length) revert CodecHelpers.InvalidProofLength();
@@ -510,7 +510,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         (nullifySigner, nullifySignature, offset) = CodecHelpers.deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
 
         // Deserialize Finalize
-        (finalizeProposalBytes, offset) = extractProposalBytes(proof, offset, DIGEST_LENGTH);
+        (finalizeProposalBytes, offset) = extractProposalBytes(proof, offset, digestLength);
         (finalizeSigner, finalizeSignature, offset) = CodecHelpers.deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
 
         if (offset != proof.length) revert CodecHelpers.InvalidProofLength();

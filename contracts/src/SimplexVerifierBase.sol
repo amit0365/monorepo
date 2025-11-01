@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.19;
 
 import {CodecHelpers} from "./libraries/CodecHelpers.sol";
 
-/// @notice Digest length variants for application-level payload hashing
-/// @dev Determines the payload size in Proposal<D> encoding
-/// @dev SHA256/KECCAK256 produce 32-byte digests, SHA512 produces 64-byte digests
-enum DigestLength {
-    DIGEST_32,  // SHA256, KECCAK256 (32 bytes)
-    DIGEST_64   // SHA512 (64 bytes)
+/// @title DigestLengths
+/// @notice Internal library containing digest length constants supported by Simplex
+/// @dev Simplex only supports specific digest types, all currently 32 bytes
+library DigestLengths {
+    /// @notice SHA-256 produces 256-bit (32 bytes) digests
+    uint256 constant SHA256 = 32;
+
+    /// @notice BLAKE3 produces 256-bit (32 bytes) digests
+    uint256 constant BLAKE3 = 32;
 }
 
 /// @title SimplexVerifierBase
 /// @notice Abstract base contract for Simplex consensus proof verification
 /// @dev Provides shared deserialization logic for extracting raw bytes from proofs
 /// @dev Concrete implementations handle scheme-specific signature formats
+/// @dev Contains internal DigestLengths library for supported digest constants
 abstract contract SimplexVerifierBase {
-    // ============ Constants ============
-
-    uint256 internal constant DIGEST_LENGTH_32 = 32;
-    uint256 internal constant DIGEST_LENGTH_64 = 64;
 
     // ============ Errors ============
 
@@ -49,10 +49,10 @@ abstract contract SimplexVerifierBase {
     /// @dev Rust: consensus/src/simplex/types.rs:812-817
     /// @param data The proof calldata
     /// @param offset Starting position
-    /// @param digestLength Length of the payload digest (32 or 64 bytes)
+    /// @param digestLength Length of the payload digest in bytes (e.g., 32 for SHA256, 64 for SHA512)
     /// @return proposalBytes The raw proposal bytes
     /// @return newOffset Updated offset after reading
-    function extractProposalBytes(bytes calldata data, uint256 offset, DigestLength digestLength)
+    function extractProposalBytes(bytes calldata data, uint256 offset, uint256 digestLength)
         internal pure returns (bytes calldata proposalBytes, uint256 newOffset)
     {
         uint256 startOffset = offset;
@@ -64,9 +64,8 @@ abstract contract SimplexVerifierBase {
         (, offset) = CodecHelpers.decodeVarintU64(data, offset);
 
         // Skip payload (digest length dependent)
-        uint256 payloadLength = digestLength == DigestLength.DIGEST_32 ? DIGEST_LENGTH_32 : DIGEST_LENGTH_64;
-        if (offset + payloadLength > data.length) revert CodecHelpers.InvalidProofLength();
-        offset += payloadLength;
+        if (offset + digestLength > data.length) revert CodecHelpers.InvalidProofLength();
+        offset += digestLength;
 
         return (data[startOffset:offset], offset);
     }

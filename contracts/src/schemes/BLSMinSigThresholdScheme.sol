@@ -11,7 +11,7 @@ import {BLS2} from "../libraries/BLS2Extensions.sol";
 /// @dev The threshold public key is passed as the publicKey parameter in verifySignature
 /// @dev WARNING: Individual signatures are NOT attributable (threshold allows forgery)
 /// @dev Uses MinSig variant: Threshold key in G2 (96 bytes), Signatures in G1 (48 bytes)
-contract BLSThresholdScheme is ISignatureScheme {
+contract BLSMinSigThresholdScheme is ISignatureScheme {
     // ============ Constants ============
 
     uint256 constant BLS_PUBLIC_KEY_LENGTH = 96; // G2 for MinSig variant
@@ -43,7 +43,7 @@ contract BLSThresholdScheme is ISignatureScheme {
 
     /// @inheritdoc ISignatureScheme
     function SCHEME_ID() external pure returns (string memory) {
-        return "BLS12381_THRESHOLD";
+        return "BLS12381_THRESHOLD_MINSIG";
     }
 
     /// @inheritdoc ISignatureScheme
