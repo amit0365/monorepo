@@ -11,23 +11,23 @@ import {Ed25519} from "../crypto/ed25519/Ed25519.sol";
 contract Ed25519Scheme is ISignatureScheme {
     // ============ Constants ============
 
-    uint256 constant ED25519_PUBLIC_KEY_LENGTH = 32;
-    uint256 constant ED25519_SIGNATURE_LENGTH = 64;
+    uint256 private constant ED25519_PUBLIC_KEY_LENGTH = 32;
+    uint256 private constant ED25519_SIGNATURE_LENGTH = 64;
 
     // ============ Interface Implementation ============
 
     /// @inheritdoc ISignatureScheme
-    function SCHEME_ID() external pure returns (string memory) {
+    function schemeId() external pure returns (string memory) {
         return "ED25519";
     }
 
     /// @inheritdoc ISignatureScheme
-    function PUBLIC_KEY_LENGTH() external pure returns (uint256) {
+    function publicKeyLength() external pure returns (uint256) {
         return ED25519_PUBLIC_KEY_LENGTH;
     }
 
     /// @inheritdoc ISignatureScheme
-    function SIGNATURE_LENGTH() external pure returns (uint256) {
+    function signatureLength() external pure returns (uint256) {
         return ED25519_SIGNATURE_LENGTH;
     }
 

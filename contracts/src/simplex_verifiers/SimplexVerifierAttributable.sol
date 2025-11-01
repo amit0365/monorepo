@@ -15,10 +15,10 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
     // ============ Immutable Configuration ============
 
     /// @notice The keystore that manages validator keys and owns the scheme
-    IKeyStore public immutable keyStore;
+    IKeyStore public immutable KEY_STORE;
 
     /// @notice Digest length in bytes (use DigestLengths constants)
-    uint256 public immutable digestLength;
+    uint256 public immutable DIGEST_LENGTH;
 
     // ============ Constructor ============
 
@@ -28,8 +28,8 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         IKeyStore _keyStore,
         uint256 _digestLength
     ) {
-        keyStore = _keyStore;
-        digestLength = _digestLength;
+        KEY_STORE = _keyStore;
+        DIGEST_LENGTH = _digestLength;
     }
 
     // ============ Scheme Properties ============
@@ -37,19 +37,19 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
     /// @notice Get the signature scheme from the keystore
     /// @return The signature scheme instance
     function scheme() public view returns (ISignatureScheme) {
-        return keyStore.scheme();
+        return KEY_STORE.scheme();
     }
 
     /// @notice Get the signature length from the scheme
     /// @return Length of signatures in bytes (64 for Ed25519, 96 for BLS)
-    function SIGNATURE_LENGTH() public view returns (uint256) {
-        return keyStore.scheme().SIGNATURE_LENGTH();
+    function signatureLength() public view returns (uint256) {
+        return KEY_STORE.scheme().signatureLength();
     }
 
     /// @notice Get the public key length from the scheme
     /// @return Length of public keys in bytes (32 for Ed25519, 48+ for BLS)
-    function PUBLIC_KEY_LENGTH() public view returns (uint256) {
-        return keyStore.scheme().PUBLIC_KEY_LENGTH();
+    function publicKeyLength() public view returns (uint256) {
+        return KEY_STORE.scheme().publicKeyLength();
     }
 
     // ============ Deserialisation helper ============
@@ -60,7 +60,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
     /// @param proof The serialized certificate bytes
     /// @param offset Starting offset (after proposal/round bytes)
     /// @param maxParticipants Maximum participants for DoS protection
-    /// @param signatureLength Length of each signature in bytes
+    /// @param sigLength Length of each signature in bytes
     /// @return signersBitmap Bitmap indicating which validators signed
     /// @return signatures Array of signature bytes
     /// @return newOffset Updated offset after reading all signatures
@@ -68,7 +68,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         bytes calldata proof,
         uint256 offset,
         uint32 maxParticipants,
-        uint256 signatureLength
+        uint256 sigLength
     ) internal pure returns (
         bytes calldata signersBitmap,
         bytes[] memory signatures,
@@ -86,9 +86,9 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         // Read all signatures
         signatures = new bytes[](signatureCount);
         for (uint64 i = 0; i < signatureCount; i++) {
-            if (offset + signatureLength > proof.length) revert InvalidProofLength();
-            signatures[i] = proof[offset:offset+signatureLength];
-            offset += signatureLength;
+            if (offset + sigLength > proof.length) revert InvalidProofLength();
+            signatures[i] = proof[offset:offset + sigLength];
+            offset += sigLength;
         }
 
         return (signersBitmap, signatures, offset);
@@ -110,7 +110,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         if (signatures.length != publicKeys.length) return false;
 
         for (uint256 i = 0; i < signatures.length; i++) {
-            if (!keyStore.scheme().verifySignature(signedMessage, publicKeys[i], signatures[i])) {
+            if (!KEY_STORE.scheme().verifySignature(signedMessage, publicKeys[i], signatures[i])) {
                 return false;
             }
         }
@@ -135,8 +135,8 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         )
     {
         uint256 offset;
-        (proposalBytes, offset) = extractProposalBytes(proof, 0, digestLength);
-        (signer, signature, offset) = deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
+        (proposalBytes, offset) = extractProposalBytes(proof, 0, DIGEST_LENGTH);
+        (signer, signature, offset) = deserializeSignerAndSignature(proof, offset, signatureLength());
         if (offset != proof.length) revert InvalidProofLength();
         return (proposalBytes, signer, signature);
     }
@@ -157,7 +157,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
     {
         uint256 offset;
         (roundBytes, offset) = extractRoundBytes(proof, 0);
-        (signer, signature, offset) = deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
+        (signer, signature, offset) = deserializeSignerAndSignature(proof, offset, signatureLength());
         if (offset != proof.length) revert InvalidProofLength();
         return (roundBytes, signer, signature);
     }
@@ -189,12 +189,12 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         (bytes calldata proposalBytes, uint32 signer, bytes calldata signature) = deserializeNotarize(proof);
 
         // Validate signer index
-        require(signer < keyStore.getParticipantCount(), "Invalid signer index");
+        require(signer < KEY_STORE.getParticipantCount(), "Invalid signer index");
 
         // Verify signature
-        return keyStore.scheme().verifySignature(
+        return KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_NOTARIZE"), proposalBytes),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             signature
         );
     }
@@ -212,12 +212,12 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         (bytes calldata roundBytes, uint32 signer, bytes calldata signature) = deserializeNullify(proof);
 
         // Validate signer index
-        require(signer < keyStore.getParticipantCount(), "Invalid signer index");
+        require(signer < KEY_STORE.getParticipantCount(), "Invalid signer index");
 
         // Verify signature
-        return keyStore.scheme().verifySignature(
+        return KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_NULLIFY"), roundBytes),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             signature
         );
     }
@@ -235,12 +235,12 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         (bytes calldata proposalBytes, uint32 signer, bytes calldata signature) = deserializeFinalize(proof);
 
         // Validate signer index
-        require(signer < keyStore.getParticipantCount(), "Invalid signer index");
+        require(signer < KEY_STORE.getParticipantCount(), "Invalid signer index");
 
         // Verify signature
-        return keyStore.scheme().verifySignature(
+        return KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_FINALIZE"), proposalBytes),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             signature
         );
     }
@@ -264,7 +264,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         uint256 offset = 0;
 
         // Extract proposal bytes first
-        (proposalBytes, offset) = extractProposalBytes(proof, 0, digestLength);
+        (proposalBytes, offset) = extractProposalBytes(proof, 0, DIGEST_LENGTH);
 
         // Deserialize bitmap and signatures
         (signersBitmap, signatures, offset) =
@@ -272,7 +272,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
                 proof,
                 offset,
                 maxParticipants,
-                SIGNATURE_LENGTH()
+                signatureLength()
             );
 
         if (offset != proof.length) revert InvalidProofLength();
@@ -305,7 +305,7 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
                 proof,
                 offset,
                 maxParticipants,
-                SIGNATURE_LENGTH()
+                signatureLength()
             );
 
         if (offset != proof.length) revert InvalidProofLength();
@@ -351,11 +351,11 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         bytes[] memory signerPublicKeys = new bytes[](signatures.length);
         uint256 signerIndex = 0;
         uint256 bitmapBitIndex = 0;
-        uint256 participantCount = keyStore.getParticipantCount();
+        uint256 participantCount = KEY_STORE.getParticipantCount();
 
         for (uint256 i = 0; i < participantCount && signerIndex < signatures.length; i++) {
             if (CodecHelpers.getBit(signersBitmap, bitmapBitIndex)) {
-                signerPublicKeys[signerIndex] = keyStore.getParticipant(i);
+                signerPublicKeys[signerIndex] = KEY_STORE.getParticipant(i);
                 signerIndex++;
             }
             bitmapBitIndex++;
@@ -477,12 +477,12 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         uint256 offset = 0;
 
         // Deserialize first Notarize
-        (proposalBytes1, offset) = extractProposalBytes(proof, offset, digestLength);
-        (signer1, signature1, offset) = deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
+        (proposalBytes1, offset) = extractProposalBytes(proof, offset, DIGEST_LENGTH);
+        (signer1, signature1, offset) = deserializeSignerAndSignature(proof, offset, signatureLength());
 
         // Deserialize second Notarize
-        (proposalBytes2, offset) = extractProposalBytes(proof, offset, digestLength);
-        (signer2, signature2, offset) = deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
+        (proposalBytes2, offset) = extractProposalBytes(proof, offset, DIGEST_LENGTH);
+        (signer2, signature2, offset) = deserializeSignerAndSignature(proof, offset, signatureLength());
 
         if (offset != proof.length) revert InvalidProofLength();
 
@@ -534,11 +534,11 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
 
         // Deserialize Nullify
         (nullifyRoundBytes, offset) = extractRoundBytes(proof, offset);
-        (nullifySigner, nullifySignature, offset) = deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
+        (nullifySigner, nullifySignature, offset) = deserializeSignerAndSignature(proof, offset, signatureLength());
 
         // Deserialize Finalize
-        (finalizeProposalBytes, offset) = extractProposalBytes(proof, offset, digestLength);
-        (finalizeSigner, finalizeSignature, offset) = deserializeSignerAndSignature(proof, offset, SIGNATURE_LENGTH());
+        (finalizeProposalBytes, offset) = extractProposalBytes(proof, offset, DIGEST_LENGTH);
+        (finalizeSigner, finalizeSignature, offset) = deserializeSignerAndSignature(proof, offset, signatureLength());
 
         if (offset != proof.length) revert InvalidProofLength();
 
@@ -572,21 +572,21 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         ) = deserializeConflictingNotarize(proof);
 
         // Validate signer index
-        require(signer < keyStore.getParticipantCount(), "Invalid signer index");
+        require(signer < KEY_STORE.getParticipantCount(), "Invalid signer index");
 
         // Verify first signature
-        if (!keyStore.scheme().verifySignature(
+        if (!KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_NOTARIZE"), proposalBytes1),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             signature1
         )) {
             return false;
         }
 
         // Verify second signature
-        return keyStore.scheme().verifySignature(
+        return KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_NOTARIZE"), proposalBytes2),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             signature2
         );
     }
@@ -611,21 +611,21 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         ) = deserializeConflictingFinalize(proof);
 
         // Validate signer index
-        require(signer < keyStore.getParticipantCount(), "Invalid signer index");
+        require(signer < KEY_STORE.getParticipantCount(), "Invalid signer index");
 
         // Verify first signature
-        if (!keyStore.scheme().verifySignature(
+        if (!KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_FINALIZE"), proposalBytes1),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             signature1
         )) {
             return false;
         }
 
         // Verify second signature
-        return keyStore.scheme().verifySignature(
+        return KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_FINALIZE"), proposalBytes2),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             signature2
         );
     }
@@ -650,21 +650,21 @@ contract SimplexVerifierAttributable is SimplexVerifierBase {
         ) = deserializeNullifyFinalize(proof);
 
         // Validate signer index
-        require(signer < keyStore.getParticipantCount(), "Invalid signer index");
+        require(signer < KEY_STORE.getParticipantCount(), "Invalid signer index");
 
         // Verify nullify signature
-        if (!keyStore.scheme().verifySignature(
+        if (!KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_NULLIFY"), nullifyRoundBytes),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             nullifySignature
         )) {
             return false;
         }
 
         // Verify finalize signature
-        return keyStore.scheme().verifySignature(
+        return KEY_STORE.scheme().verifySignature(
             encodeSignedMessage(abi.encodePacked(namespace, "_FINALIZE"), finalizeProposalBytes),
-            keyStore.getParticipant(signer),
+            KEY_STORE.getParticipant(signer),
             finalizeSignature
         );
     }

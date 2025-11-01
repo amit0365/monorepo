@@ -9,15 +9,15 @@ pragma solidity ^0.8.24;
 interface ISignatureScheme {
     /// @notice Get the unique identifier for this signature scheme
     /// @return Scheme identifier string (e.g., "ED25519", "BLS12381")
-    function SCHEME_ID() external pure returns (string memory);
+    function schemeId() external pure returns (string memory);
 
     /// @notice Get the length of public keys for this scheme
     /// @return Length in bytes (32 for Ed25519, 48 for BLS G1, 96 for BLS G2)
-    function PUBLIC_KEY_LENGTH() external pure returns (uint256);
+    function publicKeyLength() external pure returns (uint256);
 
     /// @notice Get the length of signatures for this scheme
     /// @return Length in bytes (64 for Ed25519, 48 for BLS G1, 96 for BLS G2)
-    function SIGNATURE_LENGTH() external pure returns (uint256);
+    function signatureLength() external pure returns (uint256);
 
     /// @notice Verify a signature
     /// @dev The message is the full signed message (NOT pre-hashed) in union_unique format

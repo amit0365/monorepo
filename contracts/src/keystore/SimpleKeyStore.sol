@@ -12,7 +12,7 @@ contract SimpleKeyStore is IKeyStore {
     // ============ Immutable Configuration ============
 
     /// @notice The signature scheme this keystore manages keys for
-    ISignatureScheme public immutable scheme;
+    ISignatureScheme public immutable SCHEME;
 
     // ============ State Variables ============
 
@@ -25,16 +25,24 @@ contract SimpleKeyStore is IKeyStore {
     /// @notice Create a new SimpleKeyStore for a specific signature scheme
     /// @param _scheme The signature scheme that defines key format and length
     constructor(ISignatureScheme _scheme) {
-        scheme = _scheme;
+        SCHEME = _scheme;
+    }
+
+    // ============ Scheme Access ============
+
+    /// @notice Get the signature scheme this keystore manages
+    /// @return The signature scheme instance
+    function scheme() external view returns (ISignatureScheme) {
+        return SCHEME;
     }
 
     // ============ Key Management ============
 
     /// @notice Update the validator public keys
     /// @dev Overwrites existing keys - does not support historical key sets
-    /// @param keys Array of public keys (must match scheme.PUBLIC_KEY_LENGTH())
+    /// @param keys Array of public keys (must match scheme.publicKeyLength())
     function setParticipants(bytes[] calldata keys) external {
-        uint256 expectedLength = scheme.PUBLIC_KEY_LENGTH();
+        uint256 expectedLength = SCHEME.publicKeyLength();
 
         // Validate all keys have correct length for this scheme
         for (uint256 i = 0; i < keys.length; i++) {

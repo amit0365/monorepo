@@ -24,6 +24,6 @@ interface IKeyStore {
     function getParticipantCount() external view returns (uint256);
 
     /// @notice Update the validator public keys
-    /// @param keys Array of public keys (must match scheme.PUBLIC_KEY_LENGTH())
+    /// @param keys Array of public keys (must match scheme.publicKeyLength())
     function setParticipants(bytes[] calldata keys) external;
 }
