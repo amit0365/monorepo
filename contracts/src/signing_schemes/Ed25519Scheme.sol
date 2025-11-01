@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {ISignatureScheme} from "../interfaces/ISignatureScheme.sol";
-import {Ed25519} from "../libraries/Ed25519.sol";
+import {ISignatureScheme} from "./interfaces/ISignatureScheme.sol";
+import {Ed25519} from "../lib/Ed25519.sol";
 
 /// @title Ed25519Scheme
 /// @notice Ed25519 signature scheme implementation

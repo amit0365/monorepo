@@ -17,9 +17,6 @@ library CodecHelpers {
     // ============ Errors ============
 
     error InvalidVarint();
-    error InvalidProofLength();
-    error InvalidBitmapTrailingBits();
-    error TooManySigners();
 
     // ============ Varint Encoding ============
 
@@ -156,91 +153,7 @@ library CodecHelpers {
         if (byteIndex >= bitmap.length) return false;
 
         uint8 byteValue = uint8(bitmap[byteIndex]);
-        uint8 mask = uint8(1 << bitInByte);
+        uint8 mask = uint8(uint8(1) << bitInByte);
         return (byteValue & mask) != 0;
-    }
-
-    /// @notice Deserialize signers bitmap from proof data
-    /// @dev Encoding format:
-    ///      - bitmap_length: u64 (8 bytes big-endian)
-    ///      - bitmap_bytes: (bitmap_length + 7) / 8 bytes
-    /// @dev Validates trailing bits in the last byte are zero
-    /// @param proof The encoded proof bytes
-    /// @param offset The starting offset in the proof
-    /// @param maxParticipants Maximum allowed participants (for DoS protection)
-    /// @return bitmapLengthInBits The number of bits in the bitmap
-    /// @return signersBitmap The bitmap bytes
-    /// @return newOffset Updated offset after reading the bitmap
-    function deserializeSignersBitmap(
-        bytes calldata proof,
-        uint256 offset,
-        uint32 maxParticipants
-    ) internal pure returns (
-        uint64 bitmapLengthInBits,
-        bytes memory signersBitmap,
-        uint256 newOffset
-    ) {
-        // Read bitmap length (8 bytes big-endian u64)
-        if (offset + 8 > proof.length) revert InvalidProofLength();
-        bitmapLengthInBits = uint64(bytes8(proof[offset:offset+8]));
-        offset += 8;
-
-        // Bound the bitmap length by the maximum participants
-        if (bitmapLengthInBits > maxParticipants) revert TooManySigners();
-
-        // Calculate number of bytes needed for bitmap
-        uint256 numBitmapBytes = (bitmapLengthInBits + 7) >> 3; // divide by 8, round up
-
-        // Read bitmap bytes
-        if (offset + numBitmapBytes > proof.length) revert InvalidProofLength();
-        signersBitmap = proof[offset:offset + numBitmapBytes];
-        offset += numBitmapBytes;
-
-        // Validate trailing bits are zero in the last byte
-        // This ensures canonical encoding - extra bits must not be set
-        uint256 fullBytes = bitmapLengthInBits >> 3;
-        uint256 remainder = bitmapLengthInBits & 7;
-        if (remainder != 0 && numBitmapBytes > 0) {
-            uint8 lastByte = uint8(signersBitmap[fullBytes]);
-            // Allowed lower bits mask: (1 << remainder) - 1
-            uint8 allowedLower = uint8((1 << remainder) - 1);
-            // Upper bits (beyond bitmap length) must be zero
-            if ((lastByte & ~allowedLower) != 0) revert InvalidBitmapTrailingBits();
-        }
-
-        return (bitmapLengthInBits, signersBitmap, offset);
-    }
-
-    // ============ Attributable Scheme Helpers ============
-
-    /// @notice Deserialize signer + signature from individual vote (attributable schemes)
-    /// @dev Common logic for attributable schemes (Ed25519, BLS Multisig, etc.)
-    /// @dev Format: signer (4 bytes big-endian) + signature (signatureLength bytes)
-    /// @param proof The serialized proof bytes
-    /// @param offset Starting offset
-    /// @param signatureLength Length of the signature in bytes (64 for Ed25519, 96 for BLS)
-    /// @return signer The signer index
-    /// @return signature The signature bytes
-    /// @return newOffset Updated offset after reading
-    function deserializeSignerAndSignature(
-        bytes calldata proof,
-        uint256 offset,
-        uint256 signatureLength
-    ) internal pure returns (
-        uint32 signer,
-        bytes calldata signature,
-        uint256 newOffset
-    ) {
-        // Read signer: 4 bytes big-endian
-        if (offset + 4 > proof.length) revert InvalidProofLength();
-        signer = uint32(bytes4(proof[offset:offset+4]));
-        offset += 4;
-
-        // Read signature: signatureLength bytes
-        if (offset + signatureLength > proof.length) revert InvalidProofLength();
-        signature = proof[offset:offset+signatureLength];
-        offset += signatureLength;
-
-        return (signer, signature, offset);
     }
 }
