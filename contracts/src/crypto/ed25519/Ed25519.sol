@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// taken from https://github.com/pavlovdog/farcaster-solidity/blob/main/contracts/libraries/Ed25519.sol
 pragma solidity ^0.8.9;
 
 import {Sha512} from "./Sha512.sol";
@@ -373,6 +374,8 @@ library Ed25519 {
                 uint256 vvy = 1;
                 uint256 vvv = 1;
                 for (uint256 i = 252; ; i--) {
+                    // Windowed scalar multiplication: check bit at position i+3 (8 = 1<<3)
+                    // forge-lint: disable-next-line(incorrect-shift)
                     uint256 bit = 8 << i;
                     if ((ss & bit) != 0) {
                         uint256 ws;
@@ -406,6 +409,8 @@ library Ed25519 {
                             );
                         }
                         uint256 j = (ss >> i) & 7;
+                        // Clear 3 bits at position i (7 = 0b111)
+                        // forge-lint: disable-next-line(incorrect-shift)
                         ss &= ~(7 << i);
                         uint256[8][3][2] memory tables_ = tables;
                         uint256 aa =
@@ -463,6 +468,8 @@ library Ed25519 {
                             );
                         }
                         uint256 j = (hhh >> i) & 7;
+                        // Clear 3 bits at position i (7 = 0b111)
+                        // forge-lint: disable-next-line(incorrect-shift)
                         hhh &= ~(7 << i);
                         uint256[8][3][2] memory tables_ = tables;
                         uint256 aa =

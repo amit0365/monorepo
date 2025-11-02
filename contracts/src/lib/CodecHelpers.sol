@@ -37,6 +37,8 @@ library CodecHelpers {
 
         while (value > 0) {
             // Extract 7 data bits
+            // casting to 'uint8' is safe because DATA_BITS_MASK is 0x7F (7 bits max)
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint8 dataBits = uint8(value & DATA_BITS_MASK);
 
             // Shift value right by 7 bits for next iteration
@@ -134,7 +136,8 @@ library CodecHelpers {
             revert InvalidVarint();
         }
 
-        // Safe to cast since we verified upper bits are zero
+        // casting to 'uint32' is safe because we verified upper 32 bits are zero above
+        // forge-lint: disable-next-line(unsafe-typecast)
         value = uint32(val64);
     }
 
@@ -153,6 +156,8 @@ library CodecHelpers {
         if (byteIndex >= bitmap.length) return false;
 
         uint8 byteValue = uint8(bitmap[byteIndex]);
+        // casting to 'uint8' is safe because bitInByte is result of (& 7), so max value is 1<<7=128
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint8 mask = uint8(uint8(1) << bitInByte);
         return (byteValue & mask) != 0;
     }

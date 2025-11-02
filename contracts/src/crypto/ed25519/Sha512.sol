@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// taken from https://github.com/pavlovdog/farcaster-solidity/blob/main/contracts/libraries/Sha512.sol
 pragma solidity ^0.8.9;
 
 // Reference: https://csrc.nist.gov/csrc/media/publications/fips/180/2/archive/2002-08-01/documents/fips180-2.pdf
@@ -74,6 +75,8 @@ library Sha512 {
     // @param n num of positions to shift
     // @return uint64
     function shr(uint64 x, uint256 n) internal pure returns (uint64) {
+        // casting to 'uint64' is safe because right-shifting a uint64 cannot exceed uint64 range
+        // forge-lint: disable-next-line(unsafe-typecast)
         return uint64(x >> n);
     }
 

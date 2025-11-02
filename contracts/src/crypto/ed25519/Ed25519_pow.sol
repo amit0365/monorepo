@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// taken from https://github.com/pavlovdog/farcaster-solidity/blob/main/contracts/libraries/Ed25519_pow.sol
 pragma solidity ^0.8.9;
 
 
