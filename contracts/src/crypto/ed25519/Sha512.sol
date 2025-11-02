@@ -61,28 +61,28 @@ library Sha512 {
     // This section defines the functions that are used by sha-512.
     // https://csrc.nist.gov/csrc/media/publications/fips/180/2/archive/2002-08-01/documents/fips180-2.pdf#page=15
 
-    // @notice: Thus, ROTR(x, n) is equivalent to a circular shift (rotation) of x by n positions to the right.
+    // @notice: Thus, rotr(x, n) is equivalent to a circular shift (rotation) of x by n positions to the right.
     // @param x input num
     // @param n num of positions to circular shift
     // @return uint64
-    function ROTR(uint64 x, uint256 n) internal pure returns (uint64) {
+    function rotr(uint64 x, uint256 n) internal pure returns (uint64) {
         return (x << (64 - n)) + (x >> n);
     }
 
-    // @notice: The right shift operation SHR n(x), where x is a w-bit word and n is an integer with 0 <= n < w, is defined by SHR(x, n) = x >> n.
+    // @notice: The right shift operation shr n(x), where x is a w-bit word and n is an integer with 0 <= n < w, is defined by shr(x, n) = x >> n.
     // @param x input num
     // @param n num of positions to shift
     // @return uint64
-    function SHR(uint64 x, uint256 n) internal pure returns (uint64) {
+    function shr(uint64 x, uint256 n) internal pure returns (uint64) {
         return uint64(x >> n);
     }
 
-    // @notice: Ch(x, y, z) = (x ^ y) ⊕ (﹁ x ^ z)
+    // @notice: ch(x, y, z) = (x ^ y) ⊕ (﹁ x ^ z)
     // @param x x
     // @param y y
     // @param z z
     // @return uint64
-    function Ch(
+    function ch(
         uint64 x,
         uint64 y,
         uint64 z
@@ -90,12 +90,12 @@ library Sha512 {
         return (x & y) ^ ((x ^ 0xffffffffffffffff) & z);
     }
 
-    // @notice: Maj(x, y, z) = (x ^ y) ⊕ (x ^ z) ⊕ (y ^ z)
+    // @notice: maj(x, y, z) = (x ^ y) ⊕ (x ^ z) ⊕ (y ^ z)
     // @param x x
     // @param y y
     // @param z z
     // @return uint64
-    function Maj(
+    function maj(
         uint64 x,
         uint64 y,
         uint64 z
@@ -103,32 +103,32 @@ library Sha512 {
         return (x & y) ^ (x & z) ^ (y & z);
     }
 
-    // @notice: sigma0(x) = ROTR(x, 28) ^ ROTR(x, 34) ^ ROTR(x, 39)
+    // @notice: sigma0(x) = rotr(x, 28) ^ rotr(x, 34) ^ rotr(x, 39)
     // @param x x
     // @return uint64
     function sigma0(uint64 x) internal pure returns (uint64) {
-        return ROTR(x, 28) ^ ROTR(x, 34) ^ ROTR(x, 39);
+        return rotr(x, 28) ^ rotr(x, 34) ^ rotr(x, 39);
     }
 
-    // @notice: sigma1(x) = ROTR(x, 14) ^ ROTR(x, 18) ^ ROTR(x, 41)
+    // @notice: sigma1(x) = rotr(x, 14) ^ rotr(x, 18) ^ rotr(x, 41)
     // @param x x
     // @return uint64
     function sigma1(uint64 x) internal pure returns (uint64) {
-        return ROTR(x, 14) ^ ROTR(x, 18) ^ ROTR(x, 41);
+        return rotr(x, 14) ^ rotr(x, 18) ^ rotr(x, 41);
     }
 
-    // @notice: gamma0(x) = OTR(x, 1) ^ ROTR(x, 8) ^ SHR(x, 7)
+    // @notice: gamma0(x) = rotr(x, 1) ^ rotr(x, 8) ^ shr(x, 7)
     // @param x x
     // @return uint64
     function gamma0(uint64 x) internal pure returns (uint64) {
-        return ROTR(x, 1) ^ ROTR(x, 8) ^ SHR(x, 7);
+        return rotr(x, 1) ^ rotr(x, 8) ^ shr(x, 7);
     }
 
-    // @notice: gamma1(x) = ROTR(x, 19) ^ ROTR(x, 61) ^ SHR(x, 6)
+    // @notice: gamma1(x) = rotr(x, 19) ^ rotr(x, 61) ^ shr(x, 6)
     // @param x x
     // @return uint64
     function gamma1(uint64 x) internal pure returns (uint64) {
-        return ROTR(x, 19) ^ ROTR(x, 61) ^ SHR(x, 6);
+        return rotr(x, 19) ^ rotr(x, 61) ^ shr(x, 6);
     }
 
     struct FuncVar {
@@ -158,8 +158,8 @@ library Sha512 {
         ];
 
         unchecked {
-            uint64 T1;
-            uint64 T2;
+            uint64 t1;
+            uint64 t2;
 
             uint64[80] memory W;
             FuncVar memory fvar;
@@ -272,22 +272,22 @@ library Sha512 {
                             W[i - 16];
                     }
 
-                    T1 =
+                    t1 =
                         fvar.h +
                         sigma1(fvar.e) +
-                        Ch(fvar.e, fvar.f, fvar.g) +
+                        ch(fvar.e, fvar.f, fvar.g) +
                         K[i] +
                         W[i];
-                    T2 = sigma0(fvar.a) + Maj(fvar.a, fvar.b, fvar.c);
+                    t2 = sigma0(fvar.a) + maj(fvar.a, fvar.b, fvar.c);
 
                     fvar.h = fvar.g;
                     fvar.g = fvar.f;
                     fvar.f = fvar.e;
-                    fvar.e = fvar.d + T1;
+                    fvar.e = fvar.d + t1;
                     fvar.d = fvar.c;
                     fvar.c = fvar.b;
                     fvar.b = fvar.a;
-                    fvar.a = T1 + T2;
+                    fvar.a = t1 + t2;
                 }
 
                 H[0] = H[0] + fvar.a;

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.9;
 
-import "./Sha512.sol";
-import "./Ed25519_pow.sol";
+import {Sha512} from "./Sha512.sol";
+import {Ed25519_pow} from "./Ed25519_pow.sol";
 
 library Ed25519 {
     function verify(

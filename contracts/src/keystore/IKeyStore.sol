@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "../signing_schemes/interfaces/ISignatureScheme.sol";
+import {ISignatureScheme} from "../signing_schemes/interfaces/ISignatureScheme.sol";
 
 /// @title IKeyStore
 /// @notice Interface for managing validator public keys

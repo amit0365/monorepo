@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./IKeyStore.sol";
-import "../signing_schemes/interfaces/ISignatureScheme.sol";
+import {IKeyStore} from "./IKeyStore.sol";
+import {ISignatureScheme} from "../signing_schemes/interfaces/ISignatureScheme.sol";
 
 /// @title SimpleKeyStore
 /// @notice Simple key storage implementation for managing a single validator set

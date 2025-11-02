@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./SimplexVerifierBase.sol";
+import {SimplexVerifierBase} from "./SimplexVerifierBase.sol";
 import {CodecHelpers} from "../lib/CodecHelpers.sol";
 import {IKeyStore} from "../keystore/IKeyStore.sol";
 import {ISignatureScheme} from "../signing_schemes/interfaces/ISignatureScheme.sol";

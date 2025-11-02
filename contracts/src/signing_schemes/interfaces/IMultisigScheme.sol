@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./ISignatureScheme.sol";
+import {ISignatureScheme} from "./ISignatureScheme.sol";
 
 /// @title IMultisigScheme
 /// @notice Interface for multisignature schemes that support key aggregation

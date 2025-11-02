@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./simplex_verifiers/SimplexVerifierAttributable.sol";
-import "./signing_schemes/Ed25519Scheme.sol";
-import "./keystore/SimpleKeyStore.sol";
+import {SimplexVerifierAttributable} from "./simplex_verifiers/SimplexVerifierAttributable.sol";
+import {DigestLengths} from "./simplex_verifiers/SimplexVerifierBase.sol";
+import {Ed25519Scheme} from "./signing_schemes/Ed25519Scheme.sol";
+import {SimpleKeyStore} from "./keystore/SimpleKeyStore.sol";
 
 /// @title SimplexEd25519Example
 /// @notice Example deployment of SimplexVerifierAttributable with Ed25519
