@@ -26,6 +26,75 @@ impl crate::Sink for Sink {
             .map_err(|_| Error::SendFailed)?;
         Ok(())
     }
+
+    async fn send_vectored(&mut self, bufs: Vec<StableBuf>) -> Result<(), Error> {
+        use std::io::IoSlice;
+
+        if bufs.is_empty() {
+            return Ok(());
+        }
+
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        if total_len == 0 {
+            return Ok(());
+        }
+
+        let write_op = async {
+            let mut slice_index = 0;
+            let mut offset_in_slice = 0;
+            let mut remaining = total_len;
+            let mut iovecs = Vec::with_capacity(bufs.len());
+
+            while remaining > 0 {
+                iovecs.clear();
+
+                for i in slice_index..bufs.len() {
+                    let buf = &bufs[i];
+                    let start = if i == slice_index { offset_in_slice } else { 0 };
+                    let slice = &buf.as_ref()[start..];
+                    if !slice.is_empty() {
+                        iovecs.push(IoSlice::new(slice));
+                    }
+                }
+
+                if iovecs.is_empty() {
+                    break;
+                }
+
+                let wrote = self
+                    .sink
+                    .write_vectored(&iovecs)
+                    .await
+                    .map_err(|_| Error::SendFailed)?;
+                if wrote == 0 {
+                    return Err(Error::SendFailed);
+                }
+
+                remaining -= wrote;
+                let mut advance = wrote;
+
+                while advance > 0 && slice_index < bufs.len() {
+                    let buf_len = bufs[slice_index].len();
+                    let available = buf_len - offset_in_slice;
+
+                    if advance >= available {
+                        advance -= available;
+                        slice_index += 1;
+                        offset_in_slice = 0;
+                    } else {
+                        offset_in_slice += advance;
+                        advance = 0;
+                    }
+                }
+            }
+
+            Ok(())
+        };
+
+        timeout(self.write_timeout, write_op)
+            .await
+            .map_err(|_| Error::Timeout)?
+    }
 }
 
 /// Implementation of [crate::Stream] for the [tokio] runtime.

@@ -62,6 +62,13 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
         self.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
     }
+
+    async fn send_vectored(&mut self, bufs: Vec<StableBuf>) -> Result<(), crate::Error> {
+        let len: usize = bufs.iter().map(|b| b.len()).sum();
+        self.inner.send_vectored(bufs).await?;
+        self.metrics.outbound_bandwidth.inc_by(len as u64);
+        Ok(())
+    }
 }
 
 /// Receives from the `inner` stream and tracks metrics for it.

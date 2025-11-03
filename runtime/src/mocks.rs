@@ -83,6 +83,41 @@ impl SinkTrait for Sink {
         os_send.send(data).map_err(|_| Error::SendFailed)?;
         Ok(())
     }
+
+    async fn send_vectored(&mut self, bufs: Vec<StableBuf>) -> Result<(), Error> {
+        let (os_send, data) = {
+            let mut channel = self.channel.lock().unwrap();
+
+            // If the receiver is dead, we cannot send any more messages.
+            if !channel.stream_alive {
+                return Err(Error::Closed);
+            }
+
+            // Add all buffers to the channel buffer.
+            for buf in &bufs {
+                channel.buffer.extend(buf.as_ref());
+            }
+
+            // If there is a waiter and the buffer is large enough,
+            // return the waiter (while clearing the waiter field).
+            // Otherwise, return early.
+            if channel
+                .waiter
+                .as_ref()
+                .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
+            {
+                let (requested, os_send) = channel.waiter.take().unwrap();
+                let data: Vec<u8> = channel.buffer.drain(0..requested).collect();
+                (os_send, Bytes::from(data))
+            } else {
+                return Ok(());
+            }
+        };
+
+        // Resolve the waiter.
+        os_send.send(data).map_err(|_| Error::SendFailed)?;
+        Ok(())
+    }
 }
 
 impl Drop for Sink {

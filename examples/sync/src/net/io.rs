@@ -40,7 +40,7 @@ async fn run_loop<Si, St, M>(
                         let request_id = request.request_id();
                         pending_requests.insert(request_id, response_tx);
                         let data = request.encode().to_vec();
-                        if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
+                        if let Err(e) = send_frame(&mut sink, data, MAX_MESSAGE_SIZE).await {
                             if let Some(sender) = pending_requests.remove(&request_id) {
                                 let _ = sender.send(Err(Error::Network(e)));
                             }

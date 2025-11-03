@@ -32,6 +32,12 @@ impl From<bytes::BytesMut> for StableBuf {
     }
 }
 
+impl From<Bytes> for StableBuf {
+    fn from(b: Bytes) -> Self {
+        StableBuf::BytesMut(bytes::BytesMut::from(&b[..]))
+    }
+}
+
 impl From<StableBuf> for Bytes {
     fn from(buf: StableBuf) -> Self {
         match buf {

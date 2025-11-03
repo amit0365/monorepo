@@ -173,7 +173,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     let inner_routine = async move {
         send_frame(
             &mut sink,
-            config.signing_key.public_key().encode().as_ref(),
+            config.signing_key.public_key().encode(),
             config.max_message_size,
         )
         .await?;
@@ -183,13 +183,13 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
             &mut ctx,
             Context::new(current_time, ok_timestamps, config.signing_key, peer),
         );
-        send_frame(&mut sink, &syn.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, syn.encode(), config.max_message_size).await?;
 
         let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
-        send_frame(&mut sink, &ack.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
 
         Ok((
             Sender {
@@ -249,7 +249,7 @@ pub async fn listen<
             ),
             msg1,
         )?;
-        send_frame(&mut sink, &syn_ack.encode(), config.max_message_size).await?;
+        send_frame(&mut sink, syn_ack.encode(), config.max_message_size).await?;
 
         let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let ack = Ack::decode(ack_bytes)?;
@@ -290,7 +290,7 @@ impl<O: Sink> Sender<O> {
         let c = self.cipher.send(msg)?;
         send_frame(
             &mut self.sink,
-            &c,
+            c,
             self.max_message_size + CIPHERTEXT_OVERHEAD,
         )
         .await?;

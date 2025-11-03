@@ -426,6 +426,33 @@ pub trait Sink: Sync + Send + 'static {
         &mut self,
         msg: impl Into<StableBuf> + Send,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Send multiple buffers as a single vectored write operation.
+    ///
+    /// The sink takes ownership of the buffers and sends them in order.
+    /// The concatenation of all buffer slices is sent as a single logical message.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Timeout` if the write operation times out.
+    /// Returns `Error::SendFailed` for I/O errors.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation sends each buffer sequentially via `send()`.
+    /// Runtime-specific implementations may override this to use true
+    /// scatter-gather I/O for better performance.
+    fn send_vectored(
+        &mut self,
+        bufs: Vec<StableBuf>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            for buf in bufs {
+                self.send(buf).await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Interface that any runtime must implement to receive

@@ -30,6 +30,27 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
         });
         Ok(())
     }
+
+    async fn send_vectored(&mut self, bufs: Vec<StableBuf>) -> Result<(), Error> {
+        self.auditor.event(b"send_vectored_attempt", |hasher| {
+            hasher.update(self.remote_addr.to_string().as_bytes());
+            for buf in &bufs {
+                hasher.update(buf.as_ref());
+            }
+        });
+
+        self.inner.send_vectored(bufs).await.inspect_err(|e| {
+            self.auditor.event(b"send_vectored_failure", |hasher| {
+                hasher.update(self.remote_addr.to_string().as_bytes());
+                hasher.update(e.to_string().as_bytes());
+            });
+        })?;
+
+        self.auditor.event(b"send_vectored_success", |hasher| {
+            hasher.update(self.remote_addr.to_string().as_bytes());
+        });
+        Ok(())
+    }
 }
 
 /// A stream that audits network operations.

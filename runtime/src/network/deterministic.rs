@@ -19,6 +19,13 @@ impl crate::Sink for Sink {
     async fn send(&mut self, msg: impl Into<StableBuf> + Send) -> Result<(), Error> {
         self.sender.send(msg).await.map_err(|_| Error::SendFailed)
     }
+
+    async fn send_vectored(&mut self, bufs: Vec<StableBuf>) -> Result<(), Error> {
+        self.sender
+            .send_vectored(bufs)
+            .await
+            .map_err(|_| Error::SendFailed)
+    }
 }
 
 /// Implementation of [crate::Stream] for a deterministic [Network].

@@ -855,7 +855,7 @@ impl Link {
         context.with_label("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
-            if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
+            if let Err(err) = send_frame(&mut sink, dialer.clone(), max_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;
             }
@@ -869,8 +869,7 @@ impl Link {
                 let mut data = bytes::BytesMut::with_capacity(Channel::SIZE + message.len());
                 data.extend_from_slice(&channel.to_be_bytes());
                 data.extend_from_slice(&message);
-                let data = data.freeze();
-                let _ = send_frame(&mut sink, &data, max_size).await;
+                let _ = send_frame(&mut sink, data, max_size).await;
 
                 // Bump received messages metric
                 received_messages
